@@ -44,7 +44,7 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
 		t := requestTenant(r)
 		var resp flowResponse
 		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind)
+			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, nil)
 			if err != nil {
 				return err
 			}
@@ -103,9 +103,11 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		ident *identity.Identity
-		sess  *session.Session
-		token string
+		ident       *identity.Identity
+		sess        *session.Session
+		token       string
+		verif       *verificationInfo
+		holdSession bool
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindRegistration); err != nil {
@@ -126,7 +128,25 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+		addrs, err := storage.CreateAddresses(r.Context(), tx, t.ID, ident.ID, schema.VerifiableAddresses(body.Traits))
+		if err != nil {
+			return err
+		}
+		ident.Addresses = addrs
+
+		// Registration and verification are one continuous flow: a code
+		// goes out immediately, and under the default "required" policy
+		// the session is withheld until the address is proven.
+		holdSession = len(addrs) > 0 && t.Config.VerificationRequired()
+		if len(addrs) > 0 {
+			verif, err = startVerification(r, tx, t, ident.ID, addrs[0], holdSession)
+			if err != nil {
+				return err
+			}
+		}
+		if !holdSession {
+			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+		}
 		return err
 	})
 	if err != nil {
@@ -144,11 +164,18 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"session_token": token,
-		"session":       sess,
-		"identity":      ident,
-	})
+	resp := map[string]any{"identity": ident}
+	if verif != nil {
+		resp["verification"] = verif
+	}
+	if holdSession {
+		resp["state"] = "verification_required"
+	} else {
+		resp["state"] = "active"
+		resp["session_token"] = token
+		resp["session"] = sess
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +198,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	var (
 		sess  *session.Session
 		token string
+		verif *verificationInfo
 	)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindLogin); err != nil {
@@ -193,6 +221,20 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		if !match {
 			return errInvalidCredentials
 		}
+
+		// Correct password, but under the "required" policy an identity
+		// with no verified address gets a fresh code, not a session. Only
+		// runs post-authentication, so it reveals nothing to enumeration.
+		if t.Config.VerificationRequired() {
+			addrs, err := storage.AddressesForIdentity(r.Context(), tx, identityID)
+			if err != nil {
+				return err
+			}
+			if unverified := allUnverified(addrs); unverified != nil {
+				verif, err = startVerification(r, tx, t, identityID, *unverified, true)
+				return err
+			}
+		}
 		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID)
 		return err
 	})
@@ -207,11 +249,33 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if verif != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"state":        "verification_required",
+			"verification": verif,
+		})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		"state":         "active",
 		"session_token": token,
 		"session":       sess,
 	})
+}
+
+// allUnverified returns the first address when the identity has addresses
+// but none verified, nil otherwise.
+func allUnverified(addrs []identity.Address) *identity.Address {
+	if len(addrs) == 0 {
+		return nil
+	}
+	for _, a := range addrs {
+		if a.Verified {
+			return nil
+		}
+	}
+	return &addrs[0]
 }
 
 func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +300,10 @@ func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		ident, err = storage.FindIdentity(r.Context(), tx, sess.IdentityID)
+		if err != nil {
+			return err
+		}
+		ident.Addresses, err = storage.AddressesForIdentity(r.Context(), tx, ident.ID)
 		return err
 	})
 	if errors.Is(err, storage.ErrSessionNotFound) {

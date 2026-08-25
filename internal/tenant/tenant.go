@@ -15,9 +15,26 @@ var (
 )
 
 type Tenant struct {
-	ID   string `json:"id"`
-	Slug string `json:"slug"`
-	Name string `json:"name"`
+	ID     string `json:"id"`
+	Slug   string `json:"slug"`
+	Name   string `json:"name"`
+	Config Config `json:"config"`
+}
+
+// Verification policy values.
+const (
+	VerificationRequired = "required" // no session until an address is verified (default)
+	VerificationDeferred = "deferred" // session immediately, verification nags later
+)
+
+// Config is the tenant's policy configuration, stored as JSON on the
+// tenant row. Zero values mean defaults.
+type Config struct {
+	Verification string `json:"verification,omitempty"`
+}
+
+func (c Config) VerificationRequired() bool {
+	return c.Verification != VerificationDeferred
 }
 
 // Store loads tenants from persistent storage.

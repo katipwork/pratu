@@ -45,6 +45,21 @@ func TestIdentifiers(t *testing.T) {
 	}
 }
 
+func TestVerifiableAddresses(t *testing.T) {
+	s := mustParse(t)
+	got := s.VerifiableAddresses([]byte(`{"email":" Alice@Example.COM ","name":"Alice"}`))
+	want := []AddressSpec{{Channel: ChannelEmail, Value: "alice@example.com"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("VerifiableAddresses = %v, want %v", got, want)
+	}
+
+	if _, err := ParseSchema("sid", "bad", []byte(
+		`{"type":"object","properties":{"x":{"type":"string","pratu":{"verification":{"via":"pigeon"}}}}}`,
+	)); err == nil {
+		t.Error("expected error for unknown verification channel")
+	}
+}
+
 func TestFields(t *testing.T) {
 	s := mustParse(t)
 	want := []Field{

@@ -18,3 +18,9 @@ admin:
 
 database:
   url: postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable
+
+courier:
+  # "log" prints messages (including one-time codes!) to the server log —
+  # dev only. "webhook" POSTs each message as JSON to webhook_url.
+  driver: log
+  # webhook_url: http://localhost:8080/courier

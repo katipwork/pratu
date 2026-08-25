@@ -28,7 +28,7 @@ const DefaultSchemaJSON = `{
       "type": "string",
       "format": "email",
       "title": "Email",
-      "pratu": {"identifier": true}
+      "pratu": {"identifier": true, "verification": {"via": "email"}}
     },
     "name": {
       "type": "string",
@@ -54,7 +54,13 @@ type Schema struct {
 	Raw         json.RawMessage
 	compiled    *jsonschema.Schema
 	identifiers []string // top-level property names annotated as identifiers
+	verifiable  []verifiableProp
 	fields      []Field
+}
+
+type verifiableProp struct {
+	prop string
+	via  string // 'email' | 'sms'
 }
 
 // ParseSchema compiles the raw JSON Schema and extracts the pratu
@@ -79,7 +85,10 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 			Type  string `json:"type"`
 			Title string `json:"title"`
 			Pratu struct {
-				Identifier bool `json:"identifier"`
+				Identifier   bool `json:"identifier"`
+				Verification struct {
+					Via string `json:"via"`
+				} `json:"verification"`
 			} `json:"pratu"`
 		} `json:"properties"`
 		Required []string `json:"required"`
@@ -97,6 +106,13 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 		if p.Pratu.Identifier {
 			s.identifiers = append(s.identifiers, prop)
 		}
+		if via := p.Pratu.Verification.Via; via != "" {
+			if via != ChannelEmail && via != ChannelSMS {
+				return nil, fmt.Errorf("identity schema %s: property %s: verification via %q is not %q or %q",
+					name, prop, via, ChannelEmail, ChannelSMS)
+			}
+			s.verifiable = append(s.verifiable, verifiableProp{prop: prop, via: via})
+		}
 		s.fields = append(s.fields, Field{
 			Name:     prop,
 			Type:     p.Type,
@@ -105,6 +121,7 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 		})
 	}
 	sort.Strings(s.identifiers)
+	sort.Slice(s.verifiable, func(i, j int) bool { return s.verifiable[i].prop < s.verifiable[j].prop })
 	sort.Slice(s.fields, func(i, j int) bool { return s.fields[i].Name < s.fields[j].Name })
 	return s, nil
 }
@@ -147,6 +164,24 @@ func (s *Schema) Identifiers(traits []byte) []string {
 		if v, ok := m[prop].(string); ok {
 			if n := Normalize(v); n != "" {
 				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// VerifiableAddresses extracts the normalized values of all
+// verification-annotated traits, with the channel each verifies through.
+func (s *Schema) VerifiableAddresses(traits []byte) []AddressSpec {
+	var m map[string]any
+	if err := json.Unmarshal(traits, &m); err != nil {
+		return nil
+	}
+	var out []AddressSpec
+	for _, vp := range s.verifiable {
+		if v, ok := m[vp.prop].(string); ok {
+			if n := Normalize(v); n != "" {
+				out = append(out, AddressSpec{Channel: vp.via, Value: n})
 			}
 		}
 	}

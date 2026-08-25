@@ -33,6 +33,8 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver) http.Handler {
 	tenanted.HandleFunc("POST /self-service/registration", api.submitRegistration)
 	tenanted.HandleFunc("POST /self-service/login/api", api.createFlowHandler(flow.KindLogin))
 	tenanted.HandleFunc("POST /self-service/login", api.submitLogin)
+	tenanted.HandleFunc("POST /self-service/verification", api.submitVerification)
+	tenanted.HandleFunc("POST /self-service/verification/resend", api.resendVerification)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
 
 	mux := http.NewServeMux()

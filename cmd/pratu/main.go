@@ -12,7 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/katipwork/pratu/internal/config"
+	"github.com/katipwork/pratu/internal/courier"
 	"github.com/katipwork/pratu/internal/server"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -83,6 +86,16 @@ func serve(log *slog.Logger, args []string) error {
 
 	resolver := tenant.NewResolver(cfg.BaseDomain, storage.NewTenantStore(pool))
 
+	var driver courier.Driver
+	switch cfg.Courier.Driver {
+	case "webhook":
+		driver = courier.NewWebhookDriver(cfg.Courier.WebhookURL)
+	default:
+		log.Warn("courier is using the log driver; one-time codes will appear in the log (dev only)")
+		driver = courier.LogDriver{Log: log}
+	}
+	go drainCourier(ctx, log, pool, driver)
+
 	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver)}
 	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
 
@@ -111,6 +124,22 @@ func serve(log *slog.Logger, args []string) error {
 		return err
 	}
 	return admin.Shutdown(shutdownCtx)
+}
+
+// drainCourier delivers pending outbox messages until the context ends.
+func drainCourier(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, driver courier.Driver) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := storage.CourierDrain(ctx, pool, driver); err != nil && ctx.Err() == nil {
+				log.Error("courier drain failed", "error", err)
+			}
+		}
+	}
 }
 
 func migrate(log *slog.Logger, args []string) error {

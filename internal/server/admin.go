@@ -57,8 +57,9 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Slug string `json:"slug"`
-		Name string `json:"name"`
+		Slug         string `json:"slug"`
+		Name         string `json:"name"`
+		Verification string `json:"verification"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -72,8 +73,15 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	switch body.Verification {
+	case "", tenant.VerificationRequired, tenant.VerificationDeferred:
+	default:
+		writeError(w, http.StatusBadRequest, `verification must be "required" or "deferred"`)
+		return
+	}
 
-	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, []byte(identity.DefaultSchemaJSON))
+	cfg := tenant.Config{Verification: body.Verification}
+	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {
 		writeError(w, http.StatusConflict, "slug already in use")
 		return

@@ -17,6 +17,14 @@ type Config struct {
 	Public     Public   `yaml:"public"`
 	Admin      Admin    `yaml:"admin"`
 	Database   Database `yaml:"database"`
+	Courier    Courier  `yaml:"courier"`
+}
+
+type Courier struct {
+	// Driver delivers outbox messages: "log" (dev default; codes end up in
+	// the log) or "webhook" (POST each message as JSON to WebhookURL).
+	Driver     string `yaml:"driver"`
+	WebhookURL string `yaml:"webhook_url"`
 }
 
 type Public struct {
@@ -36,8 +44,9 @@ type Database struct {
 
 func defaults() Config {
 	return Config{
-		Public: Public{Listen: ":4433"},
-		Admin:  Admin{Listen: ":4434"},
+		Public:  Public{Listen: ":4433"},
+		Admin:   Admin{Listen: ":4434"},
+		Courier: Courier{Driver: "log"},
 	}
 }
 
@@ -61,12 +70,23 @@ func Load(path string) (Config, error) {
 	override(&cfg.Admin.Listen, "PRATU_ADMIN_LISTEN")
 	override(&cfg.Admin.RootKey, "PRATU_ADMIN_ROOT_KEY")
 	override(&cfg.Database.URL, "PRATU_DATABASE_URL")
+	override(&cfg.Courier.Driver, "PRATU_COURIER_DRIVER")
+	override(&cfg.Courier.WebhookURL, "PRATU_COURIER_WEBHOOK_URL")
 
 	if cfg.BaseDomain == "" {
 		return Config{}, errors.New("base_domain is required (or set PRATU_BASE_DOMAIN)")
 	}
 	if cfg.Database.URL == "" {
 		return Config{}, errors.New("database.url is required (or set PRATU_DATABASE_URL)")
+	}
+	switch cfg.Courier.Driver {
+	case "log":
+	case "webhook":
+		if cfg.Courier.WebhookURL == "" {
+			return Config{}, errors.New("courier.webhook_url is required with the webhook driver")
+		}
+	default:
+		return Config{}, fmt.Errorf("courier.driver must be \"log\" or \"webhook\", got %q", cfg.Courier.Driver)
 	}
 	return cfg, nil
 }

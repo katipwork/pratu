@@ -6,6 +6,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -57,14 +58,18 @@ func NewTenantStore(pool *pgxpool.Pool) *TenantStore {
 
 func (s *TenantStore) FindBySlug(ctx context.Context, slug string) (*tenant.Tenant, error) {
 	var t tenant.Tenant
+	var config []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT id::text, slug, name FROM tenants WHERE slug = $1`, slug,
-	).Scan(&t.ID, &t.Slug, &t.Name)
+		`SELECT id::text, slug, name, config FROM tenants WHERE slug = $1`, slug,
+	).Scan(&t.ID, &t.Slug, &t.Name, &config)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tenant.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("find tenant by slug: %w", err)
+	}
+	if err := json.Unmarshal(config, &t.Config); err != nil {
+		return nil, fmt.Errorf("parse tenant config: %w", err)
 	}
 	return &t, nil
 }

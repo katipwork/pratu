@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -11,12 +12,16 @@ import (
 
 // CreateTenant inserts a tenant and seeds it with the default Identity
 // Schema in one transaction.
-func (s *TenantStore) Create(ctx context.Context, slug, name string, defaultSchema []byte) (*tenant.Tenant, error) {
-	t := &tenant.Tenant{Slug: slug, Name: name}
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+func (s *TenantStore) Create(ctx context.Context, slug, name string, cfg tenant.Config, defaultSchema []byte) (*tenant.Tenant, error) {
+	rawCfg, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	t := &tenant.Tenant{Slug: slug, Name: name, Config: cfg}
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id::text`,
-			slug, name,
+			`INSERT INTO tenants (slug, name, config) VALUES ($1, $2, $3) RETURNING id::text`,
+			slug, name, rawCfg,
 		).Scan(&t.ID)
 		if err != nil {
 			return err
@@ -41,7 +46,7 @@ func (s *TenantStore) Create(ctx context.Context, slug, name string, defaultSche
 // List returns all tenants, newest first.
 func (s *TenantStore) List(ctx context.Context) ([]tenant.Tenant, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id::text, slug, name FROM tenants ORDER BY created_at DESC`)
+		`SELECT id::text, slug, name, config FROM tenants ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +55,11 @@ func (s *TenantStore) List(ctx context.Context) ([]tenant.Tenant, error) {
 	var out []tenant.Tenant
 	for rows.Next() {
 		var t tenant.Tenant
-		if err := rows.Scan(&t.ID, &t.Slug, &t.Name); err != nil {
+		var config []byte
+		if err := rows.Scan(&t.ID, &t.Slug, &t.Name, &config); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(config, &t.Config); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
