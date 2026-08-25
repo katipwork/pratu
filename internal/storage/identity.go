@@ -93,6 +93,19 @@ func CreateIdentity(ctx context.Context, tx pgx.Tx, tenantID, schemaID string, t
 	return &ident, nil
 }
 
+// SetPasswordCredential replaces (or creates) an identity's password hash.
+func SetPasswordCredential(ctx context.Context, tx pgx.Tx, tenantID, identityID, passwordHash string) error {
+	config, err := json.Marshal(map[string]string{"hash": passwordHash})
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO identity_credentials (tenant_id, identity_id, kind, config) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (identity_id, kind) DO UPDATE SET config = EXCLUDED.config`,
+		tenantID, identityID, identity.CredentialPassword, config)
+	return err
+}
+
 // PasswordCredential resolves a normalized identifier to its identity and
 // stored password hash.
 func PasswordCredential(ctx context.Context, tx pgx.Tx, identifier string) (identityID, hash string, err error) {

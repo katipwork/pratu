@@ -43,6 +43,10 @@ _Avoid_: Contact, channel
 Proving control of an Address with a One-Time Code. Per-tenant policy decides whether it must happen before the first session (the default) or may be deferred.
 _Avoid_: Activation, confirmation
 
+**Recovery**:
+Regaining access to an identity by proving control of a recovery-annotated Address with a One-Time Code, then setting a new password. Success revokes every other session and marks the address verified.
+_Avoid_: Password reset, forgot password
+
 **Courier**:
 The component that delivers One-Time Codes and notifications over email and SMS, using platform-level provider credentials and per-tenant templates, draining a persistent outbox.
 _Avoid_: Mailer, notifier, sender

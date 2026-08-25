@@ -45,18 +45,23 @@ func TestIdentifiers(t *testing.T) {
 	}
 }
 
-func TestVerifiableAddresses(t *testing.T) {
+func TestAddresses(t *testing.T) {
 	s := mustParse(t)
-	got := s.VerifiableAddresses([]byte(`{"email":" Alice@Example.COM ","name":"Alice"}`))
-	want := []AddressSpec{{Channel: ChannelEmail, Value: "alice@example.com"}}
+	got := s.Addresses([]byte(`{"email":" Alice@Example.COM ","name":"Alice"}`))
+	want := []AddressSpec{{Channel: ChannelEmail, Value: "alice@example.com", Verification: true, Recovery: true}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("VerifiableAddresses = %v, want %v", got, want)
+		t.Errorf("Addresses = %v, want %v", got, want)
 	}
 
 	if _, err := ParseSchema("sid", "bad", []byte(
 		`{"type":"object","properties":{"x":{"type":"string","pratu":{"verification":{"via":"pigeon"}}}}}`,
 	)); err == nil {
-		t.Error("expected error for unknown verification channel")
+		t.Error("expected error for unknown address channel")
+	}
+	if _, err := ParseSchema("sid", "bad", []byte(
+		`{"type":"object","properties":{"x":{"type":"string","pratu":{"verification":{"via":"email"},"recovery":{"via":"sms"}}}}}`,
+	)); err == nil {
+		t.Error("expected error for conflicting channels on one property")
 	}
 }
 

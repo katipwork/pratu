@@ -38,6 +38,10 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /self-service/login", api.submitLogin)
 	tenanted.HandleFunc("POST /self-service/verification", api.submitVerification)
 	tenanted.HandleFunc("POST /self-service/verification/resend", api.resendVerification)
+	tenanted.HandleFunc("POST /self-service/recovery/api", api.createFlowHandler(flow.KindRecovery))
+	tenanted.HandleFunc("POST /self-service/recovery", api.submitRecoveryAddress)
+	tenanted.HandleFunc("POST /self-service/recovery/code", api.submitRecoveryCode)
+	tenanted.HandleFunc("POST /self-service/recovery/password", api.submitRecoveryPassword)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
 
 	mux := http.NewServeMux()

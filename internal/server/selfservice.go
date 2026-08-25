@@ -19,6 +19,7 @@ import (
 	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/session"
 	"github.com/katipwork/pratu/internal/storage"
+	"github.com/katipwork/pratu/internal/tenant"
 )
 
 type publicAPI struct {
@@ -64,11 +65,16 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
-			if kind == flow.KindRegistration {
+			switch kind {
+			case flow.KindRegistration:
 				fields := append([]identity.Field(nil), schema.Fields()...)
 				resp.UI.Fields = append(fields,
 					identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
-			} else {
+			case flow.KindRecovery:
+				resp.UI.Fields = []identity.Field{
+					{Name: "address", Type: "text", Title: "Recovery address", Required: true},
+				}
+			default:
 				resp.UI.Fields = []identity.Field{
 					{Name: "identifier", Type: "text", Title: "Email", Required: true},
 					{Name: "password", Type: "password", Title: "Password", Required: true},
@@ -103,19 +109,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
 		return
 	}
-	// Policy runs before the transaction opens: the breach check is a
-	// network call and must not hold a database transaction hostage. A
-	// rejected password leaves the flow intact for another try.
-	pol := password.Policy{
-		MinLength:   t.Config.Password.MinLength,
-		BreachCheck: t.Config.Password.BreachCheckEnabled(),
-	}
-	violations, checkErr := password.Validate(r.Context(), body.Password, pol, a.breach)
-	if checkErr != nil {
-		a.log.Warn("breach check unavailable; allowing password through (fail-open)", "error", checkErr)
-	}
-	if violations != nil {
-		writeError(w, http.StatusBadRequest, "password rejected", violations...)
+	if !a.validatePassword(w, r, t, body.Password) {
 		return
 	}
 
@@ -151,7 +145,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		addrs, err := storage.CreateAddresses(r.Context(), tx, t.ID, ident.ID, schema.VerifiableAddresses(body.Traits))
+		addrs, err := storage.CreateAddresses(r.Context(), tx, t.ID, ident.ID, schema.Addresses(body.Traits))
 		if err != nil {
 			return err
 		}
@@ -160,9 +154,16 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		// Registration and verification are one continuous flow: a code
 		// goes out immediately, and under the default "required" policy
 		// the session is withheld until the address is proven.
-		holdSession = len(addrs) > 0 && t.Config.VerificationRequired()
-		if len(addrs) > 0 {
-			verif, err = a.startVerification(r, tx, t, ident.ID, addrs[0], holdSession)
+		var target *identity.Address
+		for i := range addrs {
+			if addrs[i].ForVerification {
+				target = &addrs[i]
+				break
+			}
+		}
+		holdSession = target != nil && t.Config.VerificationRequired()
+		if target != nil {
+			verif, err = a.startVerification(r, tx, t, ident.ID, *target, holdSession)
 			if err != nil {
 				return err
 			}
@@ -300,18 +301,41 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// allUnverified returns the first address when the identity has addresses
-// but none verified, nil otherwise.
-func allUnverified(addrs []identity.Address) *identity.Address {
-	if len(addrs) == 0 {
-		return nil
+// validatePassword enforces the tenant's password policy, answering the
+// request itself on rejection. It runs before any transaction opens: the
+// breach check is a network call and must not hold a transaction hostage.
+func (a *publicAPI) validatePassword(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, candidate string) bool {
+	pol := password.Policy{
+		MinLength:   t.Config.Password.MinLength,
+		BreachCheck: t.Config.Password.BreachCheckEnabled(),
 	}
-	for _, a := range addrs {
+	violations, checkErr := password.Validate(r.Context(), candidate, pol, a.breach)
+	if checkErr != nil {
+		a.log.Warn("breach check unavailable; allowing password through (fail-open)", "error", checkErr)
+	}
+	if violations != nil {
+		writeError(w, http.StatusBadRequest, "password rejected", violations...)
+		return false
+	}
+	return true
+}
+
+// allUnverified returns the first verification-purpose address when the
+// identity has such addresses but none verified, nil otherwise.
+func allUnverified(addrs []identity.Address) *identity.Address {
+	var first *identity.Address
+	for i, a := range addrs {
+		if !a.ForVerification {
+			continue
+		}
 		if a.Verified {
 			return nil
 		}
+		if first == nil {
+			first = &addrs[i]
+		}
 	}
-	return &addrs[0]
+	return first
 }
 
 func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {

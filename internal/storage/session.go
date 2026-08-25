@@ -33,6 +33,16 @@ func CreateSession(ctx context.Context, tx pgx.Tx, tenantID, identityID string) 
 	return s, token, nil
 }
 
+// RevokeSessions deletes every session belonging to an identity; recovery
+// calls this before issuing the fresh one.
+func RevokeSessions(ctx context.Context, tx pgx.Tx, identityID string) (int64, error) {
+	tag, err := tx.Exec(ctx, `DELETE FROM sessions WHERE identity_id = $1`, identityID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // FindSessionByToken resolves a presented bearer token to a live session.
 func FindSessionByToken(ctx context.Context, tx pgx.Tx, token string) (*session.Session, error) {
 	if !session.ValidToken(token) {

@@ -80,6 +80,16 @@ func ConsumeFlow(ctx context.Context, tx pgx.Tx, id string, kind flow.Kind) erro
 	return nil
 }
 
+// UpdateFlowContext replaces a flow's server-side context.
+func UpdateFlowContext(ctx context.Context, tx pgx.Tx, id string, flowContext any) error {
+	raw, err := json.Marshal(flowContext)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE flows SET context = $2 WHERE id = $1`, id, raw)
+	return err
+}
+
 // DeleteFlow removes a flow (and, via cascade, its one-time code).
 func DeleteFlow(ctx context.Context, tx pgx.Tx, id string) error {
 	_, err := tx.Exec(ctx, `DELETE FROM flows WHERE id = $1`, id)

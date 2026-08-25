@@ -5,6 +5,7 @@ package identity
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +29,11 @@ const DefaultSchemaJSON = `{
       "type": "string",
       "format": "email",
       "title": "Email",
-      "pratu": {"identifier": true, "verification": {"via": "email"}}
+      "pratu": {
+        "identifier": true,
+        "verification": {"via": "email"},
+        "recovery": {"via": "email"}
+      }
     },
     "name": {
       "type": "string",
@@ -54,13 +59,15 @@ type Schema struct {
 	Raw         json.RawMessage
 	compiled    *jsonschema.Schema
 	identifiers []string // top-level property names annotated as identifiers
-	verifiable  []verifiableProp
+	addresses   []addressProp
 	fields      []Field
 }
 
-type verifiableProp struct {
-	prop string
-	via  string // 'email' | 'sms'
+type addressProp struct {
+	prop         string
+	via          string // 'email' | 'sms'
+	verification bool
+	recovery     bool
 }
 
 // ParseSchema compiles the raw JSON Schema and extracts the pratu
@@ -89,6 +96,9 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 				Verification struct {
 					Via string `json:"via"`
 				} `json:"verification"`
+				Recovery struct {
+					Via string `json:"via"`
+				} `json:"recovery"`
 			} `json:"pratu"`
 		} `json:"properties"`
 		Required []string `json:"required"`
@@ -106,12 +116,22 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 		if p.Pratu.Identifier {
 			s.identifiers = append(s.identifiers, prop)
 		}
-		if via := p.Pratu.Verification.Via; via != "" {
+		vVia, rVia := p.Pratu.Verification.Via, p.Pratu.Recovery.Via
+		if vVia != "" && rVia != "" && vVia != rVia {
+			return nil, fmt.Errorf("identity schema %s: property %s: verification and recovery declare different channels",
+				name, prop)
+		}
+		if via := cmp.Or(vVia, rVia); via != "" {
 			if via != ChannelEmail && via != ChannelSMS {
-				return nil, fmt.Errorf("identity schema %s: property %s: verification via %q is not %q or %q",
+				return nil, fmt.Errorf("identity schema %s: property %s: address channel %q is not %q or %q",
 					name, prop, via, ChannelEmail, ChannelSMS)
 			}
-			s.verifiable = append(s.verifiable, verifiableProp{prop: prop, via: via})
+			s.addresses = append(s.addresses, addressProp{
+				prop:         prop,
+				via:          via,
+				verification: vVia != "",
+				recovery:     rVia != "",
+			})
 		}
 		s.fields = append(s.fields, Field{
 			Name:     prop,
@@ -121,7 +141,7 @@ func ParseSchema(id, name string, raw []byte) (*Schema, error) {
 		})
 	}
 	sort.Strings(s.identifiers)
-	sort.Slice(s.verifiable, func(i, j int) bool { return s.verifiable[i].prop < s.verifiable[j].prop })
+	sort.Slice(s.addresses, func(i, j int) bool { return s.addresses[i].prop < s.addresses[j].prop })
 	sort.Slice(s.fields, func(i, j int) bool { return s.fields[i].Name < s.fields[j].Name })
 	return s, nil
 }
@@ -170,18 +190,23 @@ func (s *Schema) Identifiers(traits []byte) []string {
 	return out
 }
 
-// VerifiableAddresses extracts the normalized values of all
-// verification-annotated traits, with the channel each verifies through.
-func (s *Schema) VerifiableAddresses(traits []byte) []AddressSpec {
+// Addresses extracts the normalized values of all address-annotated
+// traits, with the channel and purposes each carries.
+func (s *Schema) Addresses(traits []byte) []AddressSpec {
 	var m map[string]any
 	if err := json.Unmarshal(traits, &m); err != nil {
 		return nil
 	}
 	var out []AddressSpec
-	for _, vp := range s.verifiable {
-		if v, ok := m[vp.prop].(string); ok {
+	for _, ap := range s.addresses {
+		if v, ok := m[ap.prop].(string); ok {
 			if n := Normalize(v); n != "" {
-				out = append(out, AddressSpec{Channel: vp.via, Value: n})
+				out = append(out, AddressSpec{
+					Channel:      ap.via,
+					Value:        n,
+					Verification: ap.verification,
+					Recovery:     ap.recovery,
+				})
 			}
 		}
 	}

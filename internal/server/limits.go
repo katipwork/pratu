@@ -22,6 +22,7 @@ const (
 	limitRegisterPerIP   = 20 // per hour
 	limitVerifyPerIP     = 30 // per minute
 	limitResendPerIP     = 10 // per minute
+	limitRecoveryPerIP   = 10 // per minute
 )
 
 // Send caps: the SMS ones are the SMS-pumping protection — a per-address

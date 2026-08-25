@@ -22,18 +22,23 @@ const (
 	ChannelSMS   = "sms"
 )
 
-// Address is an email or phone number belonging to an identity, usable
-// for verification (and later recovery / SMS second factor).
+// Address is an email or phone number belonging to an identity. The For*
+// flags mirror the Identity Schema's annotations: which purposes this
+// address serves.
 type Address struct {
-	ID         string     `json:"id"`
-	Channel    string     `json:"channel"`
-	Value      string     `json:"value"`
-	Verified   bool       `json:"verified"`
-	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	ID              string     `json:"id"`
+	Channel         string     `json:"channel"`
+	Value           string     `json:"value"`
+	Verified        bool       `json:"verified"`
+	VerifiedAt      *time.Time `json:"verified_at,omitempty"`
+	ForVerification bool       `json:"for_verification"`
+	ForRecovery     bool       `json:"for_recovery"`
 }
 
 // AddressSpec is an address extracted from traits, before persistence.
 type AddressSpec struct {
-	Channel string
-	Value   string
+	Channel      string
+	Value        string
+	Verification bool
+	Recovery     bool
 }
