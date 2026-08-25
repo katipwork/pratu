@@ -27,6 +27,13 @@ const (
 	VerificationDeferred = "deferred" // session immediately, verification nags later
 )
 
+// MFA policy values.
+const (
+	MFAOff      = "off"      // second factors hidden entirely
+	MFAOptional = "optional" // users may enrol; login asks only if enrolled (default)
+	MFARequired = "required" // every login must end at aal2; unenrolled users are told to enrol
+)
+
 // Config is the tenant's policy configuration, stored as JSON on the
 // tenant row. Zero values mean defaults.
 type Config struct {
@@ -35,6 +42,15 @@ type Config struct {
 	// SMSDailyCap bounds total SMS sends per day across the whole tenant
 	// (pumping protection); 0 means the default.
 	SMSDailyCap int `json:"sms_daily_cap,omitempty"`
+	// MFA is the second-factor policy: off, optional (default), required.
+	MFA string `json:"mfa,omitempty"`
+}
+
+func (c Config) EffectiveMFA() string {
+	if c.MFA == "" {
+		return MFAOptional
+	}
+	return c.MFA
 }
 
 // DefaultSMSDailyCap applies when a tenant configures no cap.

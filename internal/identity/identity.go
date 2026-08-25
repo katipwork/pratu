@@ -13,8 +13,12 @@ type Identity struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
-// Credential kinds. Password is the only first factor in v1.
-const CredentialPassword = "password"
+// Credential kinds. Password is the only first factor in v1; TOTP is a
+// second factor.
+const (
+	CredentialPassword = "password"
+	CredentialTOTP     = "totp"
+)
 
 // Address channels.
 const (

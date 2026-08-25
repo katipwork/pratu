@@ -141,7 +141,7 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if fctx.IssueSession {
-			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, session.AAL1)
 		}
 		return err
 	})

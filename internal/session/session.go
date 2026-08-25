@@ -15,9 +15,17 @@ import (
 // arrives with tenant config work.
 const Lifetime = 24 * time.Hour
 
+// Authenticator assurance levels: AAL1 = one factor proven (password),
+// AAL2 = a second factor (TOTP) proven too.
+const (
+	AAL1 = "aal1"
+	AAL2 = "aal2"
+)
+
 type Session struct {
 	ID              string    `json:"id"`
 	IdentityID      string    `json:"identity_id"`
+	AAL             string    `json:"aal"`
 	AuthenticatedAt time.Time `json:"authenticated_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
 }

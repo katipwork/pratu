@@ -64,6 +64,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		Verification string                `json:"verification"`
 		Password     tenant.PasswordConfig `json:"password"`
 		SMSDailyCap  int                   `json:"sms_daily_cap"`
+		MFA          string                `json:"mfa"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -93,11 +94,18 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sms_daily_cap must be between 0 and 1000000")
 		return
 	}
+	switch body.MFA {
+	case "", tenant.MFAOff, tenant.MFAOptional, tenant.MFARequired:
+	default:
+		writeError(w, http.StatusBadRequest, `mfa must be "off", "optional", or "required"`)
+		return
+	}
 
 	cfg := tenant.Config{
 		Verification: body.Verification,
 		Password:     body.Password,
 		SMSDailyCap:  body.SMSDailyCap,
+		MFA:          body.MFA,
 	}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {

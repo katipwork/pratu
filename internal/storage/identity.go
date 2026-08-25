@@ -93,6 +93,54 @@ func CreateIdentity(ctx context.Context, tx pgx.Tx, tenantID, schemaID string, t
 	return &ident, nil
 }
 
+// CredentialConfig loads one credential's config for an identity, or nil
+// when the identity has no credential of that kind.
+func CredentialConfig(ctx context.Context, tx pgx.Tx, identityID, kind string) (json.RawMessage, error) {
+	var config json.RawMessage
+	err := tx.QueryRow(ctx,
+		`SELECT config FROM identity_credentials WHERE identity_id = $1 AND kind = $2`,
+		identityID, kind,
+	).Scan(&config)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return config, err
+}
+
+// SetCredential creates or replaces a credential of one kind.
+func SetCredential(ctx context.Context, tx pgx.Tx, tenantID, identityID, kind string, config any) error {
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO identity_credentials (tenant_id, identity_id, kind, config) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (identity_id, kind) DO UPDATE SET config = EXCLUDED.config`,
+		tenantID, identityID, kind, raw)
+	return err
+}
+
+// DeleteCredential removes a credential of one kind.
+func DeleteCredential(ctx context.Context, tx pgx.Tx, identityID, kind string) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM identity_credentials WHERE identity_id = $1 AND kind = $2`, identityID, kind)
+	return err
+}
+
+// IdentifierForIdentity returns one of the identity's login identifiers,
+// for labeling (e.g. the authenticator-app account name).
+func IdentifierForIdentity(ctx context.Context, tx pgx.Tx, identityID string) (string, error) {
+	var identifier string
+	err := tx.QueryRow(ctx,
+		`SELECT identifier FROM identity_identifiers WHERE identity_id = $1 ORDER BY identifier LIMIT 1`,
+		identityID,
+	).Scan(&identifier)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return identityID, nil
+	}
+	return identifier, err
+}
+
 // SetPasswordCredential replaces (or creates) an identity's password hash.
 func SetPasswordCredential(ctx context.Context, tx pgx.Tx, tenantID, identityID, passwordHash string) error {
 	config, err := json.Marshal(map[string]string{"hash": passwordHash})

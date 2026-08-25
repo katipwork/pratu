@@ -169,7 +169,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !holdSession {
-			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, session.AAL1)
 		}
 		return err
 	})
@@ -234,8 +234,10 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		token string
 		verif *verificationInfo
 	)
+	var mfaRequired, enrollNeeded bool
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindLogin); err != nil {
+		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
+		if err != nil {
 			return err
 		}
 		identityID, hash, err := storage.PasswordCredential(r.Context(), tx, identity.Normalize(body.Identifier))
@@ -269,7 +271,28 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID)
+
+		// Second factor: an enrolled TOTP turns the flow into a held
+		// mfa_required state instead of a session.
+		if t.Config.EffectiveMFA() != tenant.MFAOff {
+			secret, err := totpSecret(r.Context(), tx, identityID)
+			if err != nil {
+				return err
+			}
+			if secret != "" {
+				mfaRequired = true
+				return storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
+					IdentityID: identityID,
+					PasswordOK: true,
+				})
+			}
+			enrollNeeded = t.Config.EffectiveMFA() == tenant.MFARequired
+		}
+
+		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
+			return err
+		}
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID, session.AAL1)
 		return err
 	})
 	if err != nil {
@@ -293,9 +316,20 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if mfaRequired {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"state":   "mfa_required",
+			"methods": []string{"totp"},
+		})
+		return
+	}
 
+	state := "active"
+	if enrollNeeded {
+		state = "mfa_enrollment_required"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"state":         "active",
+		"state":         state,
 		"session_token": token,
 		"session":       sess,
 	})
@@ -338,12 +372,18 @@ func allUnverified(addrs []identity.Address) *identity.Address {
 	return first
 }
 
-func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
-	t := requestTenant(r)
+// bearerToken extracts the presented session token, if any.
+func bearerToken(r *http.Request) string {
 	token := r.Header.Get("X-Session-Token")
 	if token == "" {
 		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
+	return token
+}
+
+func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	token := bearerToken(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "no session token")
 		return

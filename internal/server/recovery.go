@@ -106,6 +106,7 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var outcome verifyOutcome
+	nextState := "set_password"
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
@@ -141,7 +142,20 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		fctx.CodeOK = true
-		return storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx)
+		if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx); err != nil {
+			return err
+		}
+		// Recovery does not bypass an enrolled second factor.
+		if !mfaHidden(t) {
+			secret, err := totpSecret(r.Context(), tx, fctx.IdentityID)
+			if err != nil {
+				return err
+			}
+			if secret != "" {
+				nextState = "totp_required"
+			}
+		}
+		return nil
 	})
 	if errors.Is(err, storage.ErrFlowNotFound) {
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
@@ -160,7 +174,7 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	case verifyWrongCode:
 		writeError(w, http.StatusBadRequest, "incorrect code")
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"state": "set_password"})
+		writeJSON(w, http.StatusOK, map[string]string{"state": nextState})
 	}
 }
 
@@ -190,6 +204,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		ident *identity.Identity
 		sess  *session.Session
 		token string
+		aal   string
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
@@ -202,6 +217,19 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		}
 		if !fctx.CodeOK {
 			return errRecoveryNotProven
+		}
+		aal = session.AAL1
+		if !mfaHidden(t) {
+			secret, err := totpSecret(r.Context(), tx, fctx.IdentityID)
+			if err != nil {
+				return err
+			}
+			if secret != "" {
+				if !fctx.TOTPOK {
+					return errSecondFactorRequired
+				}
+				aal = session.AAL2
+			}
 		}
 		if err := storage.SetPasswordCredential(r.Context(), tx, t.ID, fctx.IdentityID, hash); err != nil {
 			return err
@@ -223,7 +251,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return err
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, aal)
 		return err
 	})
 	switch {
@@ -231,6 +259,8 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
 	case errors.Is(err, errRecoveryNotProven):
 		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
+	case errors.Is(err, errSecondFactorRequired):
+		writeError(w, http.StatusForbidden, "second factor required; submit your TOTP code first")
 	case err != nil:
 		internalError(w, err)
 	default:
@@ -243,4 +273,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-var errRecoveryNotProven = errors.New("recovery code not verified")
+var (
+	errRecoveryNotProven    = errors.New("recovery code not verified")
+	errSecondFactorRequired = errors.New("second factor required")
+)
