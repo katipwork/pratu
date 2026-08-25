@@ -17,6 +17,7 @@ import (
 	"github.com/katipwork/pratu/internal/config"
 	"github.com/katipwork/pratu/internal/courier"
 	"github.com/katipwork/pratu/internal/password"
+	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/server"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -98,8 +99,10 @@ func serve(log *slog.Logger, args []string) error {
 	go drainCourier(ctx, log, pool, driver)
 
 	breach := password.NewHIBP(cfg.HIBP.BaseURL)
+	limiter := ratelimit.New(pool)
+	go cleanupRateLimits(ctx, log, limiter)
 
-	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, log)}
+	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, log)}
 	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
 
 	errc := make(chan error, 2)
@@ -127,6 +130,23 @@ func serve(log *slog.Logger, args []string) error {
 		return err
 	}
 	return admin.Shutdown(shutdownCtx)
+}
+
+// cleanupRateLimits periodically drops rate-limit windows old enough to
+// be irrelevant (the longest window in use is a day).
+func cleanupRateLimits(ctx context.Context, log *slog.Logger, limiter *ratelimit.Limiter) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := limiter.Cleanup(ctx, 48*time.Hour); err != nil && ctx.Err() == nil {
+				log.Error("rate limit cleanup failed", "error", err)
+			}
+		}
+	}
 }
 
 // drainCourier delivers pending outbox messages until the context ends.

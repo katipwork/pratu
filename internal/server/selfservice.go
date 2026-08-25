@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alexedwards/argon2id"
 	"github.com/jackc/pgx/v5"
@@ -14,14 +16,16 @@ import (
 	"github.com/katipwork/pratu/internal/flow"
 	"github.com/katipwork/pratu/internal/identity"
 	"github.com/katipwork/pratu/internal/password"
+	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/session"
 	"github.com/katipwork/pratu/internal/storage"
 )
 
 type publicAPI struct {
-	pool   *pgxpool.Pool
-	breach password.BreachChecker
-	log    *slog.Logger
+	pool    *pgxpool.Pool
+	breach  password.BreachChecker
+	limiter *ratelimit.Limiter
+	log     *slog.Logger
 }
 
 // dummyHash keeps login timing uniform when the identifier is unknown.
@@ -46,6 +50,9 @@ type flowResponse struct {
 func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t := requestTenant(r)
+		if !a.allow(w, r, "flow:ip:"+clientIP(r), limitFlowCreatePerIP, time.Minute) {
+			return
+		}
 		var resp flowResponse
 		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, nil)
@@ -79,6 +86,9 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
 
 func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
+	if !a.allow(w, r, "reg:ip:"+clientIP(r), limitRegisterPerIP, time.Hour) {
+		return
+	}
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
@@ -152,7 +162,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		// the session is withheld until the address is proven.
 		holdSession = len(addrs) > 0 && t.Config.VerificationRequired()
 		if len(addrs) > 0 {
-			verif, err = startVerification(r, tx, t, ident.ID, addrs[0], holdSession)
+			verif, err = a.startVerification(r, tx, t, ident.ID, addrs[0], holdSession)
 			if err != nil {
 				return err
 			}
@@ -164,6 +174,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		var ve validationError
+		var rl errRateLimited
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
 			writeError(w, http.StatusBadRequest, "registration flow not found or expired")
@@ -171,6 +182,8 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid traits", ve.msgs...)
 		case errors.Is(err, storage.ErrIdentifierTaken):
 			writeError(w, http.StatusConflict, "an account with this identifier already exists")
+		case errors.As(err, &rl):
+			writeRateLimited(w, rl.retryAfter)
 		default:
 			internalError(w, err)
 		}
@@ -205,6 +218,13 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Method != "password" {
 		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
+		return
+	}
+	if !a.allow(w, r, "login:ip:"+clientIP(r), limitLoginPerIP, time.Minute) {
+		return
+	}
+	if !a.allow(w, r, fmt.Sprintf("login:id:%s:%s", t.ID, identity.Normalize(body.Identifier)),
+		limitLoginPerID, time.Minute) {
 		return
 	}
 
@@ -244,7 +264,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if unverified := allUnverified(addrs); unverified != nil {
-				verif, err = startVerification(r, tx, t, identityID, *unverified, true)
+				verif, err = a.startVerification(r, tx, t, identityID, *unverified, true)
 				return err
 			}
 		}
@@ -252,11 +272,14 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if err != nil {
+		var rl errRateLimited
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
 			writeError(w, http.StatusBadRequest, "login flow not found or expired")
 		case errors.Is(err, errInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
+		case errors.As(err, &rl):
+			writeRateLimited(w, rl.retryAfter)
 		default:
 			internalError(w, err)
 		}

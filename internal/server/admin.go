@@ -63,6 +63,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		Name         string                `json:"name"`
 		Verification string                `json:"verification"`
 		Password     tenant.PasswordConfig `json:"password"`
+		SMSDailyCap  int                   `json:"sms_daily_cap"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -88,7 +89,16 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := tenant.Config{Verification: body.Verification, Password: body.Password}
+	if body.SMSDailyCap < 0 || body.SMSDailyCap > 1_000_000 {
+		writeError(w, http.StatusBadRequest, "sms_daily_cap must be between 0 and 1000000")
+		return
+	}
+
+	cfg := tenant.Config{
+		Verification: body.Verification,
+		Password:     body.Password,
+		SMSDailyCap:  body.SMSDailyCap,
+	}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {
 		writeError(w, http.StatusConflict, "slug already in use")

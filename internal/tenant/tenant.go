@@ -32,6 +32,19 @@ const (
 type Config struct {
 	Verification string         `json:"verification,omitempty"`
 	Password     PasswordConfig `json:"password,omitempty"`
+	// SMSDailyCap bounds total SMS sends per day across the whole tenant
+	// (pumping protection); 0 means the default.
+	SMSDailyCap int `json:"sms_daily_cap,omitempty"`
+}
+
+// DefaultSMSDailyCap applies when a tenant configures no cap.
+const DefaultSMSDailyCap = 1000
+
+func (c Config) EffectiveSMSDailyCap() int {
+	if c.SMSDailyCap > 0 {
+		return c.SMSDailyCap
+	}
+	return DefaultSMSDailyCap
 }
 
 func (c Config) VerificationRequired() bool {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/katipwork/pratu/internal/flow"
 	"github.com/katipwork/pratu/internal/password"
+	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/tenant"
 )
 
@@ -27,8 +28,8 @@ func requestTenant(r *http.Request) *tenant.Tenant {
 // NewPublic builds the tenant-facing handler. Health checks are
 // tenant-agnostic; everything else resolves the tenant from the Host
 // header first.
-func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, log *slog.Logger) http.Handler {
-	api := &publicAPI{pool: pool, breach: breach, log: log}
+func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, log *slog.Logger) http.Handler {
+	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, log: log}
 
 	tenanted := http.NewServeMux()
 	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration))

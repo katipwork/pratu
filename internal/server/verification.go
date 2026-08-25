@@ -28,9 +28,13 @@ type verificationInfo struct {
 
 // startVerification creates a verification flow with a fresh One-Time
 // Code and enqueues its delivery, all within the caller's tenant
-// transaction.
-func startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tenant, identityID string, addr identity.Address, issueSession bool) (*verificationInfo, error) {
+// transaction. The send caps run first: when the address is over budget
+// the whole transaction unwinds via errRateLimited.
+func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tenant, identityID string, addr identity.Address, issueSession bool) (*verificationInfo, error) {
 	ctx := r.Context()
+	if err := a.allowSend(ctx, t, addr.Channel, addr.Value); err != nil {
+		return nil, err
+	}
 	vf, err := storage.CreateFlow(ctx, tx, t.ID, flow.KindVerification, flow.VerificationContext{
 		IdentityID:   identityID,
 		AddressID:    addr.ID,
@@ -72,6 +76,9 @@ const (
 
 func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
+	if !a.allow(w, r, "verify:ip:"+clientIP(r), limitVerifyPerIP, time.Minute) {
+		return
+	}
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
@@ -166,6 +173,9 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 
 func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
+	if !a.allow(w, r, "resend:ip:"+clientIP(r), limitResendPerIP, time.Minute) {
+		return
+	}
 	flowID := r.URL.Query().Get("flow")
 
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
@@ -181,6 +191,9 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		if err := a.allowSend(r.Context(), t, addr.Channel, addr.Value); err != nil {
+			return err
+		}
 		code, err := otp.Generate()
 		if err != nil {
 			return err
@@ -193,15 +206,17 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 			"tenant": t.Name,
 		})
 	})
-	if errors.Is(err, storage.ErrFlowNotFound) {
+	var rl errRateLimited
+	switch {
+	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "verification flow not found or expired")
-		return
-	}
-	if err != nil {
+	case errors.As(err, &rl):
+		writeRateLimited(w, rl.retryAfter)
+	case err != nil:
 		internalError(w, err)
-		return
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"state": "sent"})
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": "sent"})
 }
 
 // maskAddress hides most of an address in API responses: the recipient
