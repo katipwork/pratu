@@ -1,0 +1,20 @@
+# Copy to pratu.yaml and adjust. Every value can be overridden by env:
+# PRATU_BASE_DOMAIN, PRATU_PUBLIC_LISTEN, PRATU_ADMIN_LISTEN,
+# PRATU_ADMIN_ROOT_KEY, PRATU_DATABASE_URL.
+
+# Tenant "acme" is served at acme.pratu.localhost. Browsers resolve
+# *.localhost to 127.0.0.1, so this works for local dev with no DNS setup.
+base_domain: pratu.localhost
+
+public:
+  listen: ":4433"
+
+admin:
+  listen: ":4434"
+  # Root API key for the platform admin API. Leave empty to disable the
+  # admin API; in production set PRATU_ADMIN_ROOT_KEY instead of using
+  # this file.
+  root_key: ""
+
+database:
+  url: postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable

@@ -1,0 +1,3 @@
+# Build from scratch, but delegate OAuth2/OIDC protocol internals to ory/fosite
+
+We are re-implementing the Ory *ideas* (headless self-service flows, JSON-Schema identities, admin/public API split) in our own Go codebase rather than wrapping Kratos/Hydra, because first-class multi-tenancy is the core requirement and it is painful to bolt onto Ory. The one exception: OAuth2/OIDC token, grant, and consent protocol logic uses `ory/fosite` instead of hand-rolled code — hand-rolled OAuth2 is the classic way auth servers acquire vulnerabilities, and protocol conformance is not where this project differentiates.

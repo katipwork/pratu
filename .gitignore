@@ -1,0 +1,5 @@
+/bin/
+/pratu
+pratu.yaml
+*.test
+.env

@@ -1,0 +1,140 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/katipwork/pratu/internal/config"
+	"github.com/katipwork/pratu/internal/server"
+	"github.com/katipwork/pratu/internal/storage"
+	"github.com/katipwork/pratu/internal/tenant"
+)
+
+// version is stamped at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+
+	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	var err error
+	switch os.Args[1] {
+	case "serve":
+		err = serve(log, os.Args[2:])
+	case "migrate":
+		err = migrate(log, os.Args[2:])
+	case "version":
+		fmt.Println(version)
+	default:
+		usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		log.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `pratu - multi-tenant authentication server
+
+Usage:
+  pratu serve   [-config pratu.yaml]   run the public and admin servers
+  pratu migrate [-config pratu.yaml]   apply pending database migrations
+  pratu version                        print the version
+`)
+}
+
+func loadConfig(args []string, cmd string) (config.Config, error) {
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	path := fs.String("config", "", "path to YAML config file")
+	if err := fs.Parse(args); err != nil {
+		return config.Config{}, err
+	}
+	return config.Load(*path)
+}
+
+func serve(log *slog.Logger, args []string) error {
+	cfg, err := loadConfig(args, "serve")
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := storage.Connect(ctx, cfg.Database.URL)
+	if err != nil {
+		return fmt.Errorf("connect to database: %w", err)
+	}
+	defer pool.Close()
+
+	resolver := tenant.NewResolver(cfg.BaseDomain, storage.NewTenantStore(pool))
+
+	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver)}
+	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
+
+	errc := make(chan error, 2)
+	go func() {
+		log.Info("public server listening", "addr", cfg.Public.Listen, "base_domain", cfg.BaseDomain)
+		errc <- public.ListenAndServe()
+	}()
+	go func() {
+		log.Info("admin server listening", "addr", cfg.Admin.Listen)
+		errc <- admin.ListenAndServe()
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Info("shutting down")
+	case err := <-errc:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := public.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	return admin.Shutdown(shutdownCtx)
+}
+
+func migrate(log *slog.Logger, args []string) error {
+	cfg, err := loadConfig(args, "migrate")
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := storage.Connect(ctx, cfg.Database.URL)
+	if err != nil {
+		return fmt.Errorf("connect to database: %w", err)
+	}
+	defer pool.Close()
+
+	applied, err := storage.Migrate(ctx, pool)
+	if err != nil {
+		return err
+	}
+	for _, v := range applied {
+		log.Info("applied migration", "version", v)
+	}
+	log.Info("migrations up to date", "applied_now", len(applied))
+	return nil
+}
