@@ -1,0 +1,269 @@
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/alexedwards/argon2id"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/katipwork/pratu/internal/flow"
+	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/session"
+	"github.com/katipwork/pratu/internal/storage"
+)
+
+type publicAPI struct {
+	pool *pgxpool.Pool
+}
+
+// dummyHash keeps login timing uniform when the identifier is unknown.
+var dummyHash = func() string {
+	h, err := argon2id.CreateHash("pratu-timing-equalizer", argon2id.DefaultParams)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
+
+// flowResponse is the JSON shape of a created flow: what to render, where
+// to submit. The ui block will grow toward full node descriptions as the
+// flow engine matures.
+type flowResponse struct {
+	flow.Flow
+	UI struct {
+		Fields []identity.Field `json:"fields"`
+	} `json:"ui"`
+}
+
+func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t := requestTenant(r)
+		var resp flowResponse
+		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind)
+			if err != nil {
+				return err
+			}
+			resp.Flow = *f
+			schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
+			if err != nil {
+				return err
+			}
+			if kind == flow.KindRegistration {
+				fields := append([]identity.Field(nil), schema.Fields()...)
+				resp.UI.Fields = append(fields,
+					identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
+			} else {
+				resp.UI.Fields = []identity.Field{
+					{Name: "identifier", Type: "text", Title: "Email", Required: true},
+					{Name: "password", Type: "password", Title: "Password", Required: true},
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			internalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	flowID := r.URL.Query().Get("flow")
+
+	var body struct {
+		Method   string          `json:"method"`
+		Traits   json.RawMessage `json:"traits"`
+		Password string          `json:"password"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Method != "password" {
+		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
+		return
+	}
+	// Full NIST password policy (per-tenant length, breach check) is its
+	// own slice; the floor stops the empty and trivial cases meanwhile.
+	if len(body.Password) < 10 {
+		writeError(w, http.StatusBadRequest, "password must be at least 10 characters")
+		return
+	}
+
+	hash, err := argon2id.CreateHash(body.Password, argon2id.DefaultParams)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+
+	var (
+		ident *identity.Identity
+		sess  *session.Session
+		token string
+	)
+	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindRegistration); err != nil {
+			return err
+		}
+		schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
+		if err != nil {
+			return err
+		}
+		if msgs := schema.ValidateTraits(body.Traits); msgs != nil {
+			return validationError{msgs}
+		}
+		identifiers := schema.Identifiers(body.Traits)
+		if len(identifiers) == 0 {
+			return validationError{[]string{"traits contain no login identifier"}}
+		}
+		ident, err = storage.CreateIdentity(r.Context(), tx, t.ID, schema.ID, body.Traits, hash, identifiers)
+		if err != nil {
+			return err
+		}
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID)
+		return err
+	})
+	if err != nil {
+		var ve validationError
+		switch {
+		case errors.Is(err, storage.ErrFlowNotFound):
+			writeError(w, http.StatusBadRequest, "registration flow not found or expired")
+		case errors.As(err, &ve):
+			writeError(w, http.StatusBadRequest, "invalid traits", ve.msgs...)
+		case errors.Is(err, storage.ErrIdentifierTaken):
+			writeError(w, http.StatusConflict, "an account with this identifier already exists")
+		default:
+			internalError(w, err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_token": token,
+		"session":       sess,
+		"identity":      ident,
+	})
+}
+
+func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	flowID := r.URL.Query().Get("flow")
+
+	var body struct {
+		Method     string `json:"method"`
+		Identifier string `json:"identifier"`
+		Password   string `json:"password"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Method != "password" {
+		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
+		return
+	}
+
+	var (
+		sess  *session.Session
+		token string
+	)
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindLogin); err != nil {
+			return err
+		}
+		identityID, hash, err := storage.PasswordCredential(r.Context(), tx, identity.Normalize(body.Identifier))
+		if errors.Is(err, storage.ErrNoCredential) {
+			// Equalize timing with the real verification path before
+			// returning the uniform failure.
+			_, _ = argon2id.ComparePasswordAndHash(body.Password, dummyHash)
+			return errInvalidCredentials
+		}
+		if err != nil {
+			return err
+		}
+		match, err := argon2id.ComparePasswordAndHash(body.Password, hash)
+		if err != nil {
+			return err
+		}
+		if !match {
+			return errInvalidCredentials
+		}
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID)
+		return err
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrFlowNotFound):
+			writeError(w, http.StatusBadRequest, "login flow not found or expired")
+		case errors.Is(err, errInvalidCredentials):
+			writeError(w, http.StatusUnauthorized, "invalid credentials")
+		default:
+			internalError(w, err)
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_token": token,
+		"session":       sess,
+	})
+}
+
+func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	token := r.Header.Get("X-Session-Token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "no session token")
+		return
+	}
+
+	var (
+		sess  *session.Session
+		ident *identity.Identity
+	)
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		var err error
+		sess, err = storage.FindSessionByToken(r.Context(), tx, token)
+		if err != nil {
+			return err
+		}
+		ident, err = storage.FindIdentity(r.Context(), tx, sess.IdentityID)
+		return err
+	})
+	if errors.Is(err, storage.ErrSessionNotFound) {
+		writeError(w, http.StatusUnauthorized, "session not found or expired")
+		return
+	}
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session":  sess,
+		"identity": ident,
+	})
+}
+
+var errInvalidCredentials = errors.New("invalid credentials")
+
+type validationError struct {
+	msgs []string
+}
+
+func (validationError) Error() string { return "traits validation failed" }
+
+func internalError(w http.ResponseWriter, err error) {
+	// The error itself is server-side information; log it, tell the client
+	// nothing beyond the status.
+	logError(err)
+	writeError(w, http.StatusInternalServerError, "internal server error")
+}

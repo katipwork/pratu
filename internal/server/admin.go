@@ -2,16 +2,27 @@ package server
 
 import (
 	"crypto/subtle"
+	"errors"
 	"net/http"
+	"regexp"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/storage"
+	"github.com/katipwork/pratu/internal/tenant"
 )
 
 // NewAdmin builds the platform admin handler. It runs on its own listener
 // and is never routed through tenant hostnames. Health checks are open;
 // everything under /admin/ requires the root API key.
 func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
-	api := http.NewServeMux() // tenant, schema, and OAuth2 client management mount here
+	admin := &adminAPI{tenants: storage.NewTenantStore(pool)}
+
+	api := http.NewServeMux()
+	api.HandleFunc("POST /admin/tenants", admin.createTenant)
+	api.HandleFunc("GET /admin/tenants", admin.listTenants)
+	api.HandleFunc("GET /admin/tenants/{slug}", admin.getTenant)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
@@ -23,15 +34,78 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
 func requireRootKey(rootKey string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if rootKey == "" {
-			http.Error(w, "admin API disabled: no root key configured", http.StatusServiceUnavailable)
+			writeError(w, http.StatusServiceUnavailable, "admin API disabled: no root key configured")
 			return
 		}
 		got := r.Header.Get("Authorization")
 		want := "Bearer " + rootKey
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type adminAPI struct {
+	tenants *storage.TenantStore
+}
+
+// slugPattern mirrors the CHECK constraint on tenants.slug; slugs become
+// subdomain labels, so DNS rules apply.
+var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+
+func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Slug string `json:"slug"`
+		Name string `json:"name"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if len(body.Slug) > 63 || !slugPattern.MatchString(body.Slug) {
+		writeError(w, http.StatusBadRequest,
+			"slug must be a valid DNS label: lowercase letters, digits, and inner hyphens, at most 63 characters")
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, []byte(identity.DefaultSchemaJSON))
+	if errors.Is(err, tenant.ErrSlugTaken) {
+		writeError(w, http.StatusConflict, "slug already in use")
+		return
+	}
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+func (a *adminAPI) listTenants(w http.ResponseWriter, r *http.Request) {
+	ts, err := a.tenants.List(r.Context())
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	if ts == nil {
+		ts = []tenant.Tenant{}
+	}
+	writeJSON(w, http.StatusOK, ts)
+}
+
+func (a *adminAPI) getTenant(w http.ResponseWriter, r *http.Request) {
+	t, err := a.tenants.FindBySlug(r.Context(), r.PathValue("slug"))
+	if errors.Is(err, tenant.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
 }

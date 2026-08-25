@@ -27,6 +27,22 @@ func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, err
 	}
+
+	// Tenant isolation rests on RLS (ADR 0004), and superuser or BYPASSRLS
+	// roles skip RLS entirely — running as one would silently disable the
+	// isolation guarantee, so refuse outright.
+	var elevated bool
+	err = pool.QueryRow(pingCtx,
+		`SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&elevated)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("check database role: %w", err)
+	}
+	if elevated {
+		pool.Close()
+		return nil, errors.New("database role bypasses row-level security (superuser or BYPASSRLS); connect as an unprivileged role")
+	}
 	return pool, nil
 }
 

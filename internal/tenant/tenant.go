@@ -9,12 +9,15 @@ import (
 	"strings"
 )
 
-var ErrNotFound = errors.New("tenant not found")
+var (
+	ErrNotFound  = errors.New("tenant not found")
+	ErrSlugTaken = errors.New("tenant slug already in use")
+)
 
 type Tenant struct {
-	ID   string
-	Slug string
-	Name string
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
 }
 
 // Store loads tenants from persistent storage.
