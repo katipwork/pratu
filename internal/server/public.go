@@ -6,11 +6,13 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/katipwork/pratu/internal/flow"
+	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/tenant"
 )
 
@@ -25,8 +27,8 @@ func requestTenant(r *http.Request) *tenant.Tenant {
 // NewPublic builds the tenant-facing handler. Health checks are
 // tenant-agnostic; everything else resolves the tenant from the Host
 // header first.
-func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver) http.Handler {
-	api := &publicAPI{pool: pool}
+func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, log *slog.Logger) http.Handler {
+	api := &publicAPI{pool: pool, breach: breach, log: log}
 
 	tenanted := http.NewServeMux()
 	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration))

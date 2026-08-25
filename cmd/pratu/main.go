@@ -16,6 +16,7 @@ import (
 
 	"github.com/katipwork/pratu/internal/config"
 	"github.com/katipwork/pratu/internal/courier"
+	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/server"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -96,7 +97,9 @@ func serve(log *slog.Logger, args []string) error {
 	}
 	go drainCourier(ctx, log, pool, driver)
 
-	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver)}
+	breach := password.NewHIBP(cfg.HIBP.BaseURL)
+
+	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, log)}
 	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
 
 	errc := make(chan error, 2)

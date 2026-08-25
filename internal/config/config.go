@@ -18,6 +18,14 @@ type Config struct {
 	Admin      Admin    `yaml:"admin"`
 	Database   Database `yaml:"database"`
 	Courier    Courier  `yaml:"courier"`
+	HIBP       HIBP     `yaml:"hibp"`
+}
+
+type HIBP struct {
+	// BaseURL of a Pwned-Passwords-compatible range API; empty means the
+	// public api.pwnedpasswords.com. The check itself is a per-tenant
+	// setting and fails open when the API is unreachable.
+	BaseURL string `yaml:"base_url"`
 }
 
 type Courier struct {
@@ -72,6 +80,7 @@ func Load(path string) (Config, error) {
 	override(&cfg.Database.URL, "PRATU_DATABASE_URL")
 	override(&cfg.Courier.Driver, "PRATU_COURIER_DRIVER")
 	override(&cfg.Courier.WebhookURL, "PRATU_COURIER_WEBHOOK_URL")
+	override(&cfg.HIBP.BaseURL, "PRATU_HIBP_BASE_URL")
 
 	if cfg.BaseDomain == "" {
 		return Config{}, errors.New("base_domain is required (or set PRATU_BASE_DOMAIN)")

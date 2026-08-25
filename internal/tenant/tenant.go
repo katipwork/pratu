@@ -30,11 +30,24 @@ const (
 // Config is the tenant's policy configuration, stored as JSON on the
 // tenant row. Zero values mean defaults.
 type Config struct {
-	Verification string `json:"verification,omitempty"`
+	Verification string         `json:"verification,omitempty"`
+	Password     PasswordConfig `json:"password,omitempty"`
 }
 
 func (c Config) VerificationRequired() bool {
 	return c.Verification != VerificationDeferred
+}
+
+// PasswordConfig is the tenant's password policy: NIST-style, so minimum
+// length and breach checking are the only knobs — composition rules are
+// deliberately not offered (ADR 0005).
+type PasswordConfig struct {
+	MinLength   int   `json:"min_length,omitempty"`   // 0 means the default (10)
+	BreachCheck *bool `json:"breach_check,omitempty"` // nil means enabled
+}
+
+func (p PasswordConfig) BreachCheckEnabled() bool {
+	return p.BreachCheck == nil || *p.BreachCheck
 }
 
 // Store loads tenants from persistent storage.

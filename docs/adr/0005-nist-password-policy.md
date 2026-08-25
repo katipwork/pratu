@@ -1,0 +1,3 @@
+# Password policy is NIST 800-63B: length + breach check, nothing else
+
+Passwords are validated by a per-tenant minimum length (default 10, cap 128 to bound hashing cost) and a check against the Pwned Passwords corpus via the k-anonymity range API — and deliberately nothing else. There are no composition rules ("must contain a symbol") and no forced rotation, and the tenant config intentionally offers no knobs for them: NIST 800-63B found both reduce real security, and once such knobs exist a tenant will demand they stay. The breach check **fails open** — an unreachable corpus API logs a warning and lets the password through — because signup availability must not depend on a third-party service; the trade-off is that a breached password can slip in during an outage.

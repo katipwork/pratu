@@ -3,12 +3,14 @@ package server
 import (
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
 )
@@ -57,9 +59,10 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
 
 func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Slug         string `json:"slug"`
-		Name         string `json:"name"`
-		Verification string `json:"verification"`
+		Slug         string                `json:"slug"`
+		Name         string                `json:"name"`
+		Verification string                `json:"verification"`
+		Password     tenant.PasswordConfig `json:"password"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -79,8 +82,13 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `verification must be "required" or "deferred"`)
 		return
 	}
+	if ml := body.Password.MinLength; ml != 0 && (ml < 8 || ml > password.MaxLength) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("password.min_length must be between 8 and %d", password.MaxLength))
+		return
+	}
 
-	cfg := tenant.Config{Verification: body.Verification}
+	cfg := tenant.Config{Verification: body.Verification, Password: body.Password}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {
 		writeError(w, http.StatusConflict, "slug already in use")

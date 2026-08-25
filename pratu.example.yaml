@@ -19,6 +19,11 @@ admin:
 database:
   url: postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable
 
+# hibp:
+#   # Pwned-Passwords-compatible range API for the password breach check
+#   # (per-tenant setting, on by default, fails open when unreachable).
+#   base_url: https://api.pwnedpasswords.com/range/
+
 courier:
   # "log" prints messages (including one-time codes!) to the server log —
   # dev only. "webhook" POSTs each message as JSON to webhook_url.

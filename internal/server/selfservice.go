@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -12,12 +13,15 @@ import (
 
 	"github.com/katipwork/pratu/internal/flow"
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/session"
 	"github.com/katipwork/pratu/internal/storage"
 )
 
 type publicAPI struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	breach password.BreachChecker
+	log    *slog.Logger
 }
 
 // dummyHash keeps login timing uniform when the identifier is unknown.
@@ -89,10 +93,19 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
 		return
 	}
-	// Full NIST password policy (per-tenant length, breach check) is its
-	// own slice; the floor stops the empty and trivial cases meanwhile.
-	if len(body.Password) < 10 {
-		writeError(w, http.StatusBadRequest, "password must be at least 10 characters")
+	// Policy runs before the transaction opens: the breach check is a
+	// network call and must not hold a database transaction hostage. A
+	// rejected password leaves the flow intact for another try.
+	pol := password.Policy{
+		MinLength:   t.Config.Password.MinLength,
+		BreachCheck: t.Config.Password.BreachCheckEnabled(),
+	}
+	violations, checkErr := password.Validate(r.Context(), body.Password, pol, a.breach)
+	if checkErr != nil {
+		a.log.Warn("breach check unavailable; allowing password through (fail-open)", "error", checkErr)
+	}
+	if violations != nil {
+		writeError(w, http.StatusBadRequest, "password rejected", violations...)
 		return
 	}
 
