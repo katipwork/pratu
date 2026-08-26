@@ -101,7 +101,7 @@ func serve(log *slog.Logger, args []string) error {
 
 	breach := password.NewHIBP(cfg.HIBP.BaseURL)
 	limiter := ratelimit.New(pool)
-	go cleanupRateLimits(ctx, log, limiter)
+	go runJanitor(ctx, log, pool, limiter)
 
 	var providers *oauth2.Providers
 	if cfg.OAuth2.SystemSecret != "" {
@@ -140,9 +140,28 @@ func serve(log *slog.Logger, args []string) error {
 	return admin.Shutdown(shutdownCtx)
 }
 
-// cleanupRateLimits periodically drops rate-limit windows old enough to
-// be irrelevant (the longest window in use is a day).
-func cleanupRateLimits(ctx context.Context, log *slog.Logger, limiter *ratelimit.Limiter) {
+// runJanitor sweeps dead rows — expired flows/sessions/codes, spent
+// OAuth2 rows, old courier messages, stale rate-limit windows — once at
+// startup and then every 10 minutes.
+func runJanitor(ctx context.Context, log *slog.Logger, pool *pgxpool.Pool, limiter *ratelimit.Limiter) {
+	sweep := func() {
+		deleted, err := storage.CleanupExpired(ctx, pool)
+		if err != nil && ctx.Err() == nil {
+			log.Error("janitor sweep failed", "error", err)
+		}
+		if len(deleted) > 0 {
+			args := make([]any, 0, len(deleted)*2)
+			for table, n := range deleted {
+				args = append(args, table, n)
+			}
+			log.Info("janitor swept expired rows", args...)
+		}
+		if _, err := limiter.Cleanup(ctx, 48*time.Hour); err != nil && ctx.Err() == nil {
+			log.Error("rate limit cleanup failed", "error", err)
+		}
+	}
+
+	sweep()
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -150,9 +169,7 @@ func cleanupRateLimits(ctx context.Context, log *slog.Logger, limiter *ratelimit
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := limiter.Cleanup(ctx, 48*time.Hour); err != nil && ctx.Err() == nil {
-				log.Error("rate limit cleanup failed", "error", err)
-			}
+			sweep()
 		}
 	}
 }
