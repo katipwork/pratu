@@ -68,6 +68,8 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /oauth2/token", api.oauthToken)
 	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
 	tenanted.HandleFunc("POST /oauth2/revoke", api.oauthRevoke)
+	tenanted.HandleFunc("GET /self-service/social/{provider}/browser", api.socialStart)
+	tenanted.HandleFunc("GET /self-service/social/callback", api.socialCallback)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
 	tenanted.HandleFunc("GET /sessions", api.listSessions)
 	tenanted.HandleFunc("DELETE /sessions", api.revokeOtherSessions)

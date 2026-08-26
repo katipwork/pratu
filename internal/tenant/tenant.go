@@ -47,6 +47,16 @@ type Config struct {
 	// LoginURL is the tenant's own login UI; OAuth2 authorization
 	// requests redirect there with a login_challenge (Hydra-style).
 	LoginURL string `json:"login_url,omitempty"`
+	// SocialReturnURL is where the browser lands after a social sign-in
+	// round trip (falls back to LoginURL).
+	SocialReturnURL string `json:"social_return_url,omitempty"`
+}
+
+func (c Config) EffectiveSocialReturnURL() string {
+	if c.SocialReturnURL != "" {
+		return c.SocialReturnURL
+	}
+	return c.LoginURL
 }
 
 func (c Config) EffectiveMFA() string {

@@ -17,6 +17,7 @@ const (
 	KindTOTPEnroll   Kind = "totp_enroll"
 	KindSMSEnroll    Kind = "sms_enroll"
 	KindOAuth2       Kind = "oauth2"
+	KindSocial       Kind = "social"
 )
 
 // Lifetime is how long a flow may sit unsubmitted.
@@ -78,6 +79,12 @@ type SMSEnrollContext struct {
 	Phone      string `json:"phone"`
 }
 
+// SocialContext tracks a social sign-in round trip; the flow ID doubles
+// as the OAuth2 state parameter.
+type SocialContext struct {
+	Provider string `json:"provider"`
+}
+
 // RegistrationContext pins the schema version chosen when the flow was
 // created, so a schema update mid-flow cannot shift validation.
 type RegistrationContext struct {
@@ -92,6 +99,7 @@ type OAuth2Context struct {
 	IdentityID    string   `json:"identity_id,omitempty"`
 	AAL           string   `json:"aal,omitempty"`
 	Email         string   `json:"email,omitempty"`
+	EmailVerified bool     `json:"email_verified,omitempty"`
 	Granted       bool     `json:"granted,omitempty"`
 	GrantedScopes []string `json:"granted_scopes,omitempty"`
 	Rejected      bool     `json:"rejected,omitempty"`

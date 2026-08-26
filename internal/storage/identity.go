@@ -128,8 +128,9 @@ func PutSchemaVersion(ctx context.Context, tx pgx.Tx, tenantID, name string, raw
 	return &info, err
 }
 
-// CreateIdentity inserts an identity with a password credential and its
-// login identifiers, atomically within the caller's tenant transaction.
+// CreateIdentity inserts an identity with its login identifiers and,
+// when passwordHash is non-empty, a password credential — social
+// registrations have none.
 func CreateIdentity(ctx context.Context, tx pgx.Tx, tenantID, schemaID string, traits json.RawMessage, passwordHash string, identifiers []string) (*identity.Identity, error) {
 	var ident identity.Identity
 	ident.SchemaID = schemaID
@@ -143,16 +144,18 @@ func CreateIdentity(ctx context.Context, tx pgx.Tx, tenantID, schemaID string, t
 		return nil, fmt.Errorf("insert identity: %w", err)
 	}
 
-	config, err := json.Marshal(map[string]string{"hash": passwordHash})
-	if err != nil {
-		return nil, err
-	}
-	_, err = tx.Exec(ctx,
-		`INSERT INTO identity_credentials (tenant_id, identity_id, kind, config) VALUES ($1, $2, $3, $4)`,
-		tenantID, ident.ID, identity.CredentialPassword, config,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("insert credential: %w", err)
+	if passwordHash != "" {
+		config, err := json.Marshal(map[string]string{"hash": passwordHash})
+		if err != nil {
+			return nil, err
+		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO identity_credentials (tenant_id, identity_id, kind, config) VALUES ($1, $2, $3, $4)`,
+			tenantID, ident.ID, identity.CredentialPassword, config,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert credential: %w", err)
+		}
 	}
 
 	for _, idf := range identifiers {

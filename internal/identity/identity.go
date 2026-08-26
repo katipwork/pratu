@@ -21,6 +21,7 @@ const (
 	CredentialPassword = "password"
 	CredentialTOTP     = "totp"
 	CredentialSMS      = "sms"
+	CredentialSocial   = "social"
 )
 
 var phonePattern = regexp.MustCompile(`^\+[1-9][0-9]{7,14}$`)

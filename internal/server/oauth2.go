@@ -247,6 +247,16 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 		fctx.GrantedScopes = granted
 		if strings.Contains(identifier, "@") {
 			fctx.Email = identifier
+			addrs, err := storage.AddressesForIdentity(r.Context(), tx, sess.IdentityID)
+			if err != nil {
+				return err
+			}
+			for _, addr := range addrs {
+				if addr.Value == identifier {
+					fctx.EmailVerified = addr.Verified
+					break
+				}
+			}
 		}
 		if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx); err != nil {
 			return err
@@ -363,7 +373,7 @@ func (a *publicAPI) oauthFinish(w http.ResponseWriter, r *http.Request) {
 		for _, scope := range granted {
 			ar.GrantScope(scope)
 		}
-		sess := oauth2pkg.NewSession(issuer, fctx.IdentityID, ar.GetClient().GetID(), t.ID, fctx.AAL, fctx.Email)
+		sess := oauth2pkg.NewSession(issuer, fctx.IdentityID, ar.GetClient().GetID(), t.ID, fctx.AAL, fctx.Email, fctx.EmailVerified)
 		resp, err := prov.NewAuthorizeResponse(octx, ar, sess)
 		if err != nil {
 			prov.WriteAuthorizeError(octx, w, ar, err)

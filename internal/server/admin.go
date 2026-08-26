@@ -38,6 +38,9 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string, providers *oauth2.Providers) h
 	api.HandleFunc("GET /admin/tenants/{slug}/schemas", admin.listSchemas)
 	api.HandleFunc("GET /admin/tenants/{slug}/schemas/{name}", admin.getSchema)
 	api.HandleFunc("PUT /admin/tenants/{slug}/schemas/{name}", admin.putSchema)
+	api.HandleFunc("PUT /admin/tenants/{slug}/social/{provider}", admin.putSocialProvider)
+	api.HandleFunc("GET /admin/tenants/{slug}/social", admin.listSocialProviders)
+	api.HandleFunc("DELETE /admin/tenants/{slug}/social/{provider}", admin.deleteSocialProvider)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
@@ -81,6 +84,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		SMSDailyCap  int                   `json:"sms_daily_cap"`
 		MFA          string                `json:"mfa"`
 		LoginURL     string                `json:"login_url"`
+		SocialReturn string                `json:"social_return_url"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -117,19 +121,23 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if body.LoginURL != "" {
-		if u, err := url.Parse(body.LoginURL); err != nil || !u.IsAbs() {
-			writeError(w, http.StatusBadRequest, "login_url must be an absolute URL")
+	for _, raw := range []string{body.LoginURL, body.SocialReturn} {
+		if raw == "" {
+			continue
+		}
+		if u, err := url.Parse(raw); err != nil || !u.IsAbs() {
+			writeError(w, http.StatusBadRequest, "login_url and social_return_url must be absolute URLs")
 			return
 		}
 	}
 
 	cfg := tenant.Config{
-		Verification: body.Verification,
-		Password:     body.Password,
-		SMSDailyCap:  body.SMSDailyCap,
-		MFA:          body.MFA,
-		LoginURL:     body.LoginURL,
+		Verification:    body.Verification,
+		Password:        body.Password,
+		SMSDailyCap:     body.SMSDailyCap,
+		MFA:             body.MFA,
+		LoginURL:        body.LoginURL,
+		SocialReturnURL: body.SocialReturn,
 	}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {

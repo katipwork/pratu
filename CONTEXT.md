@@ -47,6 +47,10 @@ _Avoid_: Activation, confirmation
 Regaining access to an identity by proving control of a recovery-annotated Address with a One-Time Code, then setting a new password. Success revokes every other session and marks the address verified.
 _Avoid_: Password reset, forgot password
 
+**Social Provider**:
+A per-tenant registry entry for an external sign-in source: a generic OIDC provider or GitHub. A social account maps to at most one identity via its provider-subject identifier; it auto-links to an existing identity only through a provider-verified email matching a verified Address.
+_Avoid_: IdP, connection, federation
+
 **Courier**:
 The component that delivers One-Time Codes and notifications over email and SMS, using platform-level provider credentials and per-tenant templates, draining a persistent outbox.
 _Avoid_: Mailer, notifier, sender

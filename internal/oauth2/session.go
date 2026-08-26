@@ -20,12 +20,13 @@ type Session struct {
 }
 
 // NewSession builds the session minted when a challenge is accepted.
-func NewSession(issuer, subject, clientID, tenantID, aal, email string) *Session {
+func NewSession(issuer, subject, clientID, tenantID, aal, email string, emailVerified bool) *Session {
 	now := time.Now().UTC()
 	extra := map[string]any{"tid": tenantID, "acr": aal}
 	idExtra := map[string]any{"acr": aal}
 	if email != "" {
 		idExtra["email"] = email
+		idExtra["email_verified"] = emailVerified
 	}
 	return &Session{
 		JWTSession: &foauth2.JWTSession{
