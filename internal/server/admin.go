@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -20,8 +21,8 @@ import (
 // NewAdmin builds the platform admin handler. It runs on its own listener
 // and is never routed through tenant hostnames. Health checks are open;
 // everything under /admin/ requires the root API key.
-func NewAdmin(pool *pgxpool.Pool, rootKey string, providers *oauth2.Providers) http.Handler {
-	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool), providers: providers}
+func NewAdmin(pool *pgxpool.Pool, rootKey, baseDomain string, providers *oauth2.Providers) http.Handler {
+	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool), providers: providers, baseDomain: strings.ToLower(baseDomain)}
 
 	api := http.NewServeMux()
 	api.HandleFunc("POST /admin/tenants", admin.createTenant)
@@ -41,6 +42,9 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string, providers *oauth2.Providers) h
 	api.HandleFunc("PUT /admin/tenants/{slug}/social/{provider}", admin.putSocialProvider)
 	api.HandleFunc("GET /admin/tenants/{slug}/social", admin.listSocialProviders)
 	api.HandleFunc("DELETE /admin/tenants/{slug}/social/{provider}", admin.deleteSocialProvider)
+	api.HandleFunc("PUT /admin/tenants/{slug}/domains/{domain}", admin.claimDomain)
+	api.HandleFunc("GET /admin/tenants/{slug}/domains", admin.listDomains)
+	api.HandleFunc("DELETE /admin/tenants/{slug}/domains/{domain}", admin.releaseDomain)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
@@ -66,9 +70,10 @@ func requireRootKey(rootKey string, next http.Handler) http.Handler {
 }
 
 type adminAPI struct {
-	pool      *pgxpool.Pool
-	tenants   *storage.TenantStore
-	providers *oauth2.Providers // nil when OAuth2 is disabled
+	pool       *pgxpool.Pool
+	tenants    *storage.TenantStore
+	providers  *oauth2.Providers // nil when OAuth2 is disabled
+	baseDomain string
 }
 
 // slugPattern mirrors the CHECK constraint on tenants.slug; slugs become

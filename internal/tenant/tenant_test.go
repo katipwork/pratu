@@ -6,17 +6,31 @@ import (
 	"testing"
 )
 
-type fakeStore map[string]*Tenant
+type fakeStore struct {
+	slugs   map[string]*Tenant
+	domains map[string]*Tenant
+}
 
 func (s fakeStore) FindBySlug(_ context.Context, slug string) (*Tenant, error) {
-	if t, ok := s[slug]; ok {
+	if t, ok := s.slugs[slug]; ok {
+		return t, nil
+	}
+	return nil, ErrNotFound
+}
+
+func (s fakeStore) FindByDomain(_ context.Context, domain string) (*Tenant, error) {
+	if t, ok := s.domains[domain]; ok {
 		return t, nil
 	}
 	return nil, ErrNotFound
 }
 
 func TestResolver(t *testing.T) {
-	store := fakeStore{"acme": {ID: "1", Slug: "acme", Name: "Acme"}}
+	acme := &Tenant{ID: "1", Slug: "acme", Name: "Acme"}
+	store := fakeStore{
+		slugs:   map[string]*Tenant{"acme": acme},
+		domains: map[string]*Tenant{"auth.acme-corp.example": acme},
+	}
 	r := NewResolver("pratu.localhost", store)
 
 	cases := []struct {
@@ -32,6 +46,9 @@ func TestResolver(t *testing.T) {
 		{"deep.acme.pratu.localhost", "", ErrNotFound},
 		{"acme.evil.example.com", "", ErrNotFound},
 		{"evilpratu.localhost", "", ErrNotFound},
+		{"auth.acme-corp.example", "acme", nil},
+		{"AUTH.ACME-CORP.EXAMPLE:443", "acme", nil},
+		{"other.example.com", "", ErrNotFound},
 	}
 	for _, c := range cases {
 		got, err := r.Resolve(context.Background(), c.host)

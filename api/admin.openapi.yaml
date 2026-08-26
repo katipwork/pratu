@@ -21,6 +21,7 @@ tags:
   - name: schemas
   - name: keys
   - name: social
+  - name: domains
   - name: sessions
 
 paths:
@@ -318,6 +319,51 @@ paths:
         "200": { $ref: "#/components/responses/Status" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /admin/tenants/{slug}/domains:
+    get:
+      tags: [domains]
+      summary: List the tenant's custom domains
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: Claimed domains
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    domain: { type: string }
+                    created_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/domains/{domain}:
+    put:
+      tags: [domains]
+      summary: Claim a custom domain for the tenant
+      description: |
+        Routes the hostname to this tenant (idempotent for the same
+        tenant; 409 if another tenant holds it). Domains under the base
+        domain are refused — those are addressed by slug. DNS (CNAME to
+        the deployment) and TLS termination belong to the fronting proxy.
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/domain" }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [domains]
+      summary: Release a custom domain
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/domain" }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /admin/tenants/{slug}/identities/{id}/sessions:
     get:
       tags: [sessions]
@@ -371,6 +417,11 @@ components:
       schema: { type: string }
     provider:
       name: provider
+      in: path
+      required: true
+      schema: { type: string }
+    domain:
+      name: domain
       in: path
       required: true
       schema: { type: string }

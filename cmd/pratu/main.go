@@ -137,7 +137,7 @@ func serve(log *slog.Logger, args []string) error {
 		log.Info("reference login UI enabled at /ui/ on tenant hostnames")
 	}
 	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, providers, cfg.Public.ReferenceUI, log)}
-	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey, providers)}
+	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey, cfg.BaseDomain, providers)}
 
 	errc := make(chan error, 2)
 	go func() {

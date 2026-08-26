@@ -95,12 +95,13 @@ func (p PasswordConfig) BreachCheckEnabled() bool {
 // Store loads tenants from persistent storage.
 type Store interface {
 	FindBySlug(ctx context.Context, slug string) (*Tenant, error)
+	FindByDomain(ctx context.Context, domain string) (*Tenant, error)
 }
 
 // Resolver maps a request's Host header to a Tenant. It is the only
-// component in the codebase allowed to interpret hostnames (ADR 0003).
-// v1 resolves {slug}.{baseDomain}; tenant-owned custom domains become an
-// additional lookup here later.
+// component in the codebase allowed to interpret hostnames (ADR 0003):
+// {slug}.{baseDomain} resolves by slug, anything else by the custom
+// domain table.
 type Resolver struct {
 	baseDomain string
 	store      Store
@@ -117,7 +118,10 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (*Tenant, error) {
 	host = strings.ToLower(host)
 
 	slug, ok := strings.CutSuffix(host, "."+r.baseDomain)
-	if !ok || slug == "" || strings.Contains(slug, ".") {
+	if !ok {
+		return r.store.FindByDomain(ctx, host)
+	}
+	if slug == "" || strings.Contains(slug, ".") {
 		return nil, ErrNotFound
 	}
 	return r.store.FindBySlug(ctx, slug)
