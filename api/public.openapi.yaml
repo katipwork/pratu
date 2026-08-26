@@ -1,0 +1,931 @@
+openapi: 3.0.3
+info:
+  title: Pratu Public API
+  version: 0.1.0
+  description: |
+    The tenant-facing API. Every request is addressed to a tenant hostname
+    (`{slug}.{base_domain}` or a custom domain): the Host header selects the
+    tenant, and each tenant is its own OIDC issuer.
+
+    **Flows** come in two variants. *API flows* (`/api` creation endpoints)
+    are for native apps: they return `session_token` values and need no
+    CSRF. *Browser flows* (`/browser` creation endpoints) set an HTTP-only
+    CSRF cookie, return a `csrf_token` bound to the flow, require it on
+    every submission, and set the `pratu_session` cookie instead of
+    returning a session token.
+
+    Cookie-authenticated requests to state-changing session endpoints
+    (MFA enrolment, logout, session revocation, OAuth2 accept) require the
+    session-scope CSRF token in `X-CSRF-Token`, bootstrapped from
+    `GET /sessions/whoami`. Header-token requests never need CSRF.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: "http://{tenant}.pratu.localhost:4433"
+    description: Local development (tenant subdomains of *.localhost)
+    variables:
+      tenant:
+        default: acme
+tags:
+  - name: health
+  - name: registration
+  - name: login
+  - name: verification
+  - name: recovery
+  - name: mfa
+  - name: social
+  - name: session
+  - name: oauth2
+
+paths:
+  /health/alive:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe (pings the database)
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /self-service/registration/api:
+    post:
+      tags: [registration]
+      summary: Create a registration API flow
+      parameters: [{ $ref: "#/components/parameters/schemaName" }]
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/registration/browser:
+    get:
+      tags: [registration]
+      summary: Create a registration browser flow (sets the CSRF cookie)
+      parameters: [{ $ref: "#/components/parameters/schemaName" }]
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/registration:
+    post:
+      tags: [registration]
+      summary: Submit registration
+      description: |
+        Validates traits against the flow's pinned Identity Schema and the
+        tenant password policy. Under the default `required` verification
+        policy the session is withheld until the verification flow in the
+        response is completed.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, traits, password]
+              properties:
+                method: { type: string, enum: [password] }
+                traits: { type: object }
+                password: { type: string }
+                csrf_token: { type: string }
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/login/api:
+    post:
+      tags: [login]
+      summary: Create a login API flow
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/browser:
+    get:
+      tags: [login]
+      summary: Create a login browser flow (sets the CSRF cookie)
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login:
+    post:
+      tags: [login]
+      summary: Submit password login
+      description: |
+        On success returns a session (`state: active`, or
+        `mfa_enrollment_required` when tenant policy demands an unenrolled
+        second factor). A 403 body carries `state: verification_required`
+        (with a spawned verification flow) or `state: mfa_required` (with
+        the enrolled methods); complete the latter via
+        `/self-service/login/totp` or `/self-service/login/sms`.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method, identifier, password]
+              properties:
+                method: { type: string, enum: [password] }
+                identifier: { type: string }
+                password: { type: string }
+                csrf_token: { type: string }
+      responses:
+        "200":
+          description: Session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403":
+          description: Verification or a second factor is still required
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HeldLogin" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/totp:
+    post:
+      tags: [login, mfa]
+      summary: Complete a held login with a TOTP code
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: aal2 session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/sms/send:
+    post:
+      tags: [login, mfa]
+      summary: Send a login code to the enrolled second-factor phone
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/OptionalCSRF" }
+      responses:
+        "200": { $ref: "#/components/responses/Sent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/sms:
+    post:
+      tags: [login, mfa]
+      summary: Complete a held login with the SMS code
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: aal2 session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/verification:
+    post:
+      tags: [verification]
+      summary: Prove an address with its one-time code
+      description: |
+        Five wrong attempts invalidate the code. When the flow was spawned
+        by a session-withholding registration or login, success issues the
+        session.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: Address verified
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/verification/resend:
+    post:
+      tags: [verification]
+      summary: Replace and resend the flow's one-time code
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/OptionalCSRF" }
+      responses:
+        "200": { $ref: "#/components/responses/Sent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/recovery/api:
+    post:
+      tags: [recovery]
+      summary: Create a recovery API flow
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/browser:
+    get:
+      tags: [recovery]
+      summary: Create a recovery browser flow (sets the CSRF cookie)
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery:
+    post:
+      tags: [recovery]
+      summary: Submit a recovery address
+      description: |
+        Anti-enumeration by design — the response is identical whether or
+        not the address exists (and even when a send cap suppressed the
+        delivery).
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address: { type: string }
+                csrf_token: { type: string }
+      responses:
+        "200":
+          description: Uniform acknowledgment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [code_sent] }
+                  message: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/code:
+    post:
+      tags: [recovery]
+      summary: Prove the recovery code
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: |
+            Next step: `set_password`, or `second_factor_required` with the
+            enrolled methods (recovery never bypasses MFA).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state:
+                    type: string
+                    enum: [set_password, second_factor_required]
+                  methods:
+                    type: array
+                    items: { type: string, enum: [totp, sms] }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/totp:
+    post:
+      tags: [recovery, mfa]
+      summary: Prove the second factor (TOTP) within recovery
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200": { $ref: "#/components/responses/SetPassword" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/sms/send:
+    post:
+      tags: [recovery, mfa]
+      summary: Send a second-factor SMS code within recovery
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/OptionalCSRF" }
+      responses:
+        "200": { $ref: "#/components/responses/Sent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/sms:
+    post:
+      tags: [recovery, mfa]
+      summary: Prove the second factor (SMS) within recovery
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200": { $ref: "#/components/responses/SetPassword" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/recovery/password:
+    post:
+      tags: [recovery]
+      summary: Set the new password and complete recovery
+      description: |
+        The new password passes the full tenant policy. Success replaces
+        the password credential, marks the recovery address verified,
+        revokes every other session, and issues a fresh one.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+                csrf_token: { type: string }
+      responses:
+        "200":
+          description: Recovered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/mfa/totp/enroll:
+    post:
+      tags: [mfa]
+      summary: Start TOTP enrolment
+      description: |
+        The secret stays pending in a flow until a code proves the
+        authenticator holds it. 409 when TOTP is already enrolled.
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200":
+          description: Pending enrolment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow_id: { type: string, format: uuid }
+                  secret: { type: string }
+                  uri: { type: string, description: "otpauth:// URL for QR rendering" }
+                  csrf_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/mfa/totp/confirm:
+    post:
+      tags: [mfa]
+      summary: Activate the pending TOTP enrolment; raises the session to aal2
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: Enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [enrolled] }
+                  session: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/mfa/totp:
+    delete:
+      tags: [mfa]
+      summary: Remove the TOTP factor (requires an aal2 session)
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /self-service/mfa/sms/enroll:
+    post:
+      tags: [mfa]
+      summary: Start SMS second-factor enrolment for a phone number
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone: { type: string, description: "International format, e.g. +66812345678" }
+      responses:
+        "200":
+          description: Pending enrolment; a code was sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flow_id: { type: string, format: uuid }
+                  address: { type: string, description: Masked phone }
+                  csrf_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/mfa/sms/confirm:
+    post:
+      tags: [mfa]
+      summary: Activate the pending SMS enrolment; raises the session to aal2
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: Enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [enrolled] }
+                  session: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/mfa/sms:
+    delete:
+      tags: [mfa]
+      summary: Remove the SMS factor (requires an aal2 session)
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /self-service/social/{provider}/browser:
+    get:
+      tags: [social]
+      summary: Start a social sign-in round trip
+      description: |
+        302-redirects the browser to the provider with the flow ID as the
+        OAuth2 state. On return, the callback logs in a known social
+        account, links via provider-verified email matching a verified
+        address, or registers a fresh passwordless identity — then either
+        sets the session cookie and redirects to the tenant's
+        `social_return_url`, or (with second factors enrolled) redirects
+        with `mfa_flow`, `methods`, and `mfa_csrf` parameters for
+        completion via the login TOTP/SMS endpoints.
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "302": { description: Redirect to the provider }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/social/callback:
+    get:
+      tags: [social]
+      summary: Provider callback (browser-navigated; not called directly)
+      parameters:
+        - { name: state, in: query, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        "302": { description: Redirect to the tenant's social_return_url (with error/mfa parameters as applicable) }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/logout:
+    post:
+      tags: [session]
+      summary: Revoke the current session and clear the cookie
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /sessions/whoami:
+    get:
+      tags: [session]
+      summary: Introspect the current session
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200":
+          description: |
+            The session and its identity. Cookie-sourced calls also receive
+            `csrf_token` (session scope) for use in `X-CSRF-Token`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session: { $ref: "#/components/schemas/Session" }
+                  identity: { $ref: "#/components/schemas/Identity" }
+                  csrf_token: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+  /sessions:
+    get:
+      tags: [session]
+      summary: List the identity's live sessions
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200":
+          description: Sessions, newest first; tokens are never included
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: "#/components/schemas/Session"
+                    - type: object
+                      properties:
+                        current: { type: boolean }
+        "401": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [session]
+      summary: Log out other devices (revoke every session but this one)
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      responses:
+        "200":
+          description: Count of revoked sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+                  revoked: { type: integer }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /sessions/{id}:
+    delete:
+      tags: [session]
+      summary: Revoke one of the caller's own sessions
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /.well-known/openid-configuration:
+    get:
+      tags: [oauth2]
+      summary: OIDC discovery document for this tenant's issuer
+      responses:
+        "200": { description: Discovery document, content: { application/json: { schema: { type: object } } } }
+        "503": { $ref: "#/components/responses/Error" }
+  /.well-known/jwks.json:
+    get:
+      tags: [oauth2]
+      summary: "This tenant's signing keys (active and retired)"
+      responses:
+        "200": { description: JSON Web Key Set, content: { application/json: { schema: { type: object } } } }
+        "503": { $ref: "#/components/responses/Error" }
+  /oauth2/auth:
+    get:
+      tags: [oauth2]
+      summary: Authorization endpoint (RFC 6749)
+      description: |
+        Validates the request and 302-redirects the browser to the tenant's
+        configured `login_url` with a `login_challenge` parameter.
+      responses:
+        "302": { description: Redirect to the tenant login UI }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /oauth2/auth/requests/{challenge}:
+    get:
+      tags: [oauth2]
+      summary: Describe a pending Login/Consent Challenge
+      parameters:
+        - name: challenge
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: What the UI needs to render login/consent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challenge: { type: string }
+                  client_id: { type: string }
+                  client_name: { type: string }
+                  first_party: { type: boolean }
+                  requested_scopes: { type: array, items: { type: string } }
+                  expires_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+  /oauth2/auth/accept:
+    post:
+      tags: [oauth2]
+      summary: Accept a challenge for the session's user
+      description: |
+        First-party clients default to granting everything requested;
+        third-party clients must send an explicit `grant_scopes` subset.
+      security: [{ sessionToken: [] }, { sessionCookie: [] }]
+      parameters: [{ $ref: "#/components/parameters/challenge" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                grant_scopes: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: Where to send the browser next
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  redirect_to: { type: string, format: uri }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /oauth2/auth/reject:
+    post:
+      tags: [oauth2]
+      summary: Decline a challenge (no session required)
+      parameters: [{ $ref: "#/components/parameters/challenge" }]
+      responses:
+        "200":
+          description: Where to send the browser (leads to an access_denied redirect)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  redirect_to: { type: string, format: uri }
+        "400": { $ref: "#/components/responses/Error" }
+  /oauth2/auth/finish:
+    get:
+      tags: [oauth2]
+      summary: Resume an accepted challenge (browser-navigated)
+      parameters: [{ $ref: "#/components/parameters/challenge" }]
+      responses:
+        "302": { description: "Redirect to the client with a code, or with an OAuth2 error" }
+        "400": { $ref: "#/components/responses/Error" }
+  /oauth2/token:
+    post:
+      tags: [oauth2]
+      summary: Token endpoint (authorization_code + PKCE, refresh_token)
+      description: |
+        Client auth: `client_secret_basic`, `client_secret_post`, or `none`
+        with PKCE for public clients. Access tokens are 15-minute RS256
+        JWTs; refresh tokens rotate on every use and reuse revokes the
+        whole chain.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object }
+      responses:
+        "200": { description: Token response (RFC 6749 §5.1), content: { application/json: { schema: { type: object } } } }
+        "400": { description: OAuth2 error, content: { application/json: { schema: { type: object } } } }
+        "401": { description: Client authentication failed }
+  /oauth2/introspect:
+    post:
+      tags: [oauth2]
+      summary: Token introspection (RFC 7662; client-authenticated)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object }
+      responses:
+        "200": { description: Introspection response, content: { application/json: { schema: { type: object } } } }
+        "401": { description: Client authentication failed }
+  /oauth2/revoke:
+    post:
+      tags: [oauth2]
+      summary: Token revocation (RFC 7009; client-authenticated)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object }
+      responses:
+        "200": { description: Revoked (or token unknown; per RFC both are 200) }
+        "401": { description: Client authentication failed }
+
+components:
+  securitySchemes:
+    sessionToken:
+      type: apiKey
+      in: header
+      name: X-Session-Token
+      description: Opaque session token (also accepted as `Authorization Bearer`)
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: pratu_session
+      description: Browser-flow session cookie; state-changing calls also need `X-CSRF-Token`
+  parameters:
+    flowId:
+      name: flow
+      in: query
+      required: true
+      schema: { type: string, format: uuid }
+    challenge:
+      name: challenge
+      in: query
+      required: true
+      schema: { type: string, format: uuid }
+    schemaName:
+      name: schema
+      in: query
+      required: false
+      description: Identity Schema name (default "default")
+      schema: { type: string }
+  requestBodies:
+    Code:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code]
+            properties:
+              code: { type: string }
+              csrf_token: { type: string }
+    OptionalCSRF:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              csrf_token: { type: string }
+  responses:
+    Status:
+      description: Simple state acknowledgment
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              state: { type: string }
+              status: { type: string }
+    Sent:
+      description: A code was sent
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              state: { type: string, enum: [sent] }
+              address: { type: string, description: Masked recipient }
+    SetPassword:
+      description: Second factor proven; proceed to set the password
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              state: { type: string, enum: [set_password] }
+    Flow:
+      description: A Self-Service Flow
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Flow" }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/APIError" }
+    RateLimited:
+      description: Rate limited; Retry-After indicates when the window rolls over
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/APIError" }
+  schemas:
+    APIError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            details:
+              type: array
+              items: { type: string }
+    Flow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [registration, login, recovery] }
+        expires_at: { type: string, format: date-time }
+        csrf_token: { type: string, description: Present on browser flows only }
+        ui:
+          type: object
+          properties:
+            fields:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  type: { type: string }
+                  title: { type: string }
+                  required: { type: boolean }
+    Address:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        channel: { type: string, enum: [email, sms] }
+        value: { type: string }
+        verified: { type: boolean }
+        verified_at: { type: string, format: date-time }
+        for_verification: { type: boolean }
+        for_recovery: { type: boolean }
+    Identity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        schema_id: { type: string, format: uuid }
+        traits: { type: object }
+        addresses:
+          type: array
+          items: { $ref: "#/components/schemas/Address" }
+        created_at: { type: string, format: date-time }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        identity_id: { type: string, format: uuid }
+        aal: { type: string, enum: [aal1, aal2] }
+        ip: { type: string }
+        user_agent: { type: string }
+        authenticated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    VerificationInfo:
+      type: object
+      properties:
+        flow_id: { type: string, format: uuid }
+        channel: { type: string, enum: [email, sms] }
+        address: { type: string, description: Masked }
+        csrf_token: { type: string, description: Present on browser flows only }
+        expires_at: { type: string, format: date-time }
+    AuthResult:
+      type: object
+      description: |
+        The common success shape of flow completions. `session_token`
+        appears only for API flows; browser flows set the session cookie
+        instead. `verification` appears when a verification flow was
+        spawned; `state: verification_required` means the session is
+        withheld until it completes.
+      properties:
+        state:
+          type: string
+          enum: [active, verification_required, mfa_enrollment_required, verified, recovered]
+        identity: { $ref: "#/components/schemas/Identity" }
+        session: { $ref: "#/components/schemas/Session" }
+        session_token: { type: string }
+        verification: { $ref: "#/components/schemas/VerificationInfo" }
+    HeldLogin:
+      type: object
+      description: A 403 login response demanding another step
+      properties:
+        state:
+          type: string
+          enum: [verification_required, mfa_required]
+        verification: { $ref: "#/components/schemas/VerificationInfo" }
+        methods:
+          type: array
+          items: { type: string, enum: [totp, sms] }

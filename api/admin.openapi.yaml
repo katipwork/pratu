@@ -1,0 +1,480 @@
+openapi: 3.0.3
+info:
+  title: Pratu Admin API
+  version: 0.1.0
+  description: |
+    The platform management plane. Runs on its own listener (`:4434` by
+    default) and must never be reachable through tenant hostnames or the
+    public internet. Every `/admin/*` request requires the root API key
+    as a bearer token.
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: "http://localhost:4434"
+    description: Local development
+security:
+  - rootKey: []
+tags:
+  - name: tenants
+  - name: clients
+  - name: schemas
+  - name: keys
+  - name: social
+  - name: sessions
+
+paths:
+  /health/alive:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+  /health/ready:
+    get:
+      summary: Readiness probe (pings the database)
+      security: []
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants:
+    post:
+      tags: [tenants]
+      summary: Create a tenant
+      description: |
+        Creates the tenant and seeds its `default` Identity Schema (email
+        identifier with verification and recovery annotations). The slug
+        becomes the tenant's subdomain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [tenants]
+      summary: List tenants
+      responses:
+        "200":
+          description: Tenants, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tenant" }
+  /admin/tenants/{slug}:
+    get:
+      tags: [tenants]
+      summary: Fetch one tenant
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: The tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants/{slug}/clients:
+    post:
+      tags: [clients]
+      summary: Create an OAuth2 client
+      description: |
+        Confidential clients receive a generated secret in the response —
+        the only time it exists in plaintext. Public clients get no secret
+        and are PKCE-only.
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, redirect_uris]
+              properties:
+                name: { type: string }
+                redirect_uris:
+                  type: array
+                  items: { type: string, format: uri }
+                scopes:
+                  type: array
+                  items: { type: string }
+                  description: Defaults to openid, offline_access, profile, email
+                first_party:
+                  type: boolean
+                  description: First-party clients skip the consent step
+                public: { type: boolean }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  client: { $ref: "#/components/schemas/OAuth2Client" }
+                  client_secret: { type: string, description: Shown exactly once }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [clients]
+      summary: List OAuth2 clients
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: Clients (no secrets)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OAuth2Client" }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/clients/{id}:
+    delete:
+      tags: [clients]
+      summary: Delete an OAuth2 client
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants/{slug}/schemas:
+    get:
+      tags: [schemas]
+      summary: List Identity Schema versions
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: Every version of every named schema
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SchemaInfo" }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/schemas/{name}:
+    get:
+      tags: [schemas]
+      summary: Fetch the current version of a named schema
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/schemaName" }
+      responses:
+        "200":
+          description: Current version with the raw JSON Schema
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SchemaInfo"
+                  - type: object
+                    properties:
+                      schema: { type: object }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [schemas]
+      summary: Publish a new version of a named schema
+      description: |
+        The body is the raw JSON Schema. It must compile and annotate at
+        least one property with `"pratu": {"identifier": true}`. Versions
+        are immutable: this appends (creating the name at version 1);
+        identities keep the version that validated them, and new
+        registration flows pin the version current at creation.
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/schemaName" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: A JSON Schema document }
+      responses:
+        "201":
+          description: New version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SchemaInfo" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants/{slug}/keys:
+    get:
+      tags: [keys]
+      summary: List signing keys (never private material)
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: Keys, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/KeyInfo" }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/keys/rotate:
+    post:
+      tags: [keys]
+      summary: Rotate the signing key
+      description: |
+        Retires the active key (it stays in the JWKS verifying issued
+        tokens) and mints a fresh one; the next token signs with the new
+        kid. Refresh tokens are unaffected by rotation.
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+                  kid: { type: string }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/keys/{kid}:
+    delete:
+      tags: [keys]
+      summary: Delete a retired key (tokens it signed stop verifying)
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - name: kid
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants/{slug}/social:
+    get:
+      tags: [social]
+      summary: List social providers (no secrets)
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: The tenant's provider registry
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SocialProvider" }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/social/{provider}:
+    put:
+      tags: [social]
+      summary: Create or replace a social provider
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/provider" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, client_id, client_secret]
+              properties:
+                kind: { type: string, enum: [oidc, github] }
+                label: { type: string }
+                issuer:
+                  type: string
+                  format: uri
+                  description: Required for kind oidc (discovery base URL)
+                client_id: { type: string }
+                client_secret: { type: string, description: Sealed at rest }
+                scopes:
+                  type: array
+                  items: { type: string }
+                  description: "Defaults: oidc → openid email profile; github → read:user user:email"
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SocialProvider" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [social]
+      summary: Delete a social provider
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/provider" }
+      responses:
+        "200": { $ref: "#/components/responses/Status" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /admin/tenants/{slug}/identities/{id}/sessions:
+    get:
+      tags: [sessions]
+      summary: List an identity's live sessions
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/identityId" }
+      responses:
+        "200":
+          description: Sessions (never tokens)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: object }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [sessions]
+      summary: "Kill-switch: revoke every session of an identity"
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - { $ref: "#/components/parameters/identityId" }
+      responses:
+        "200":
+          description: Count of revoked sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+                  revoked: { type: integer }
+        "404": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    rootKey:
+      type: http
+      scheme: bearer
+      description: The platform root API key (PRATU_ADMIN_ROOT_KEY)
+  parameters:
+    slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    schemaName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    provider:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string }
+    identityId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Status:
+      description: Simple state acknowledgment
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              state: { type: string }
+              status: { type: string }
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  message: { type: string }
+                  details:
+                    type: array
+                    items: { type: string }
+  schemas:
+    TenantCreate:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          description: DNS label; becomes the tenant's subdomain
+        name: { type: string }
+        verification:
+          type: string
+          enum: [required, deferred]
+          description: Default required
+        password:
+          type: object
+          properties:
+            min_length: { type: integer, minimum: 8, maximum: 128 }
+            breach_check: { type: boolean, description: Default true }
+        sms_daily_cap: { type: integer }
+        mfa:
+          type: string
+          enum: [off, optional, required]
+          description: Default optional
+        login_url:
+          type: string
+          format: uri
+          description: The tenant's login UI (OAuth2 challenges redirect here)
+        social_return_url:
+          type: string
+          format: uri
+          description: Where social sign-in round trips land
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        config: { type: object }
+    OAuth2Client:
+      type: object
+      properties:
+        client_id: { type: string }
+        name: { type: string }
+        public: { type: boolean }
+        redirect_uris:
+          type: array
+          items: { type: string, format: uri }
+        scopes:
+          type: array
+          items: { type: string }
+        first_party: { type: boolean }
+    SchemaInfo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+    KeyInfo:
+      type: object
+      properties:
+        kid: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    SocialProvider:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [oidc, github] }
+        label: { type: string }
+        issuer: { type: string }
+        client_id: { type: string }
+        scopes:
+          type: array
+          items: { type: string }

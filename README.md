@@ -16,7 +16,7 @@
 - **Abuse protection**: Postgres-backed rate limits per IP and per identifier, SMS-pumping caps (per phone, per tenant), uniform anti-enumeration responses.
 - **Operations**: message delivery through an outbox-drained Courier (log/webhook drivers), at-rest AES-256-GCM encryption for impersonation-grade secrets with key rotation, expired-row janitors, trusted-proxy support for forwarded headers, single binary, one YAML config with env overrides.
 
-The domain vocabulary lives in [CONTEXT.md](CONTEXT.md); load-bearing decisions in [docs/adr](docs/adr).
+The domain vocabulary lives in [CONTEXT.md](CONTEXT.md); load-bearing decisions in [docs/adr](docs/adr). The API is specified in [api/public.openapi.yaml](api/public.openapi.yaml) (tenant-facing self-service + OAuth2) and [api/admin.openapi.yaml](api/admin.openapi.yaml) (management plane).
 
 ## Quickstart
 
