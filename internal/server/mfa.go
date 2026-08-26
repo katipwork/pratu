@@ -58,6 +58,27 @@ func mfaHidden(t *tenant.Tenant) bool {
 	return t.Config.EffectiveMFA() == tenant.MFAOff
 }
 
+// enrolledFactors lists the identity's second factors in preference
+// order: TOTP before SMS (SMS is the weaker factor).
+func enrolledFactors(ctx context.Context, tx pgx.Tx, identityID string) ([]string, error) {
+	var methods []string
+	secret, err := totpSecret(ctx, tx, identityID)
+	if err != nil {
+		return nil, err
+	}
+	if secret != "" {
+		methods = append(methods, "totp")
+	}
+	phone, err := smsPhone(ctx, tx, identityID)
+	if err != nil {
+		return nil, err
+	}
+	if phone != "" {
+		methods = append(methods, "sms")
+	}
+	return methods, nil
+}
+
 // enrollTOTP starts enrolment for the session's identity: a fresh secret,
 // pending in a flow until a code proves the authenticator has it.
 func (a *publicAPI) enrollTOTP(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +275,7 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 		if !fctx.PasswordOK {
 			return storage.ErrFlowNotFound
 		}
-		if fctx.TOTPAttempts >= totpMaxAttempts {
+		if fctx.FactorAttempts >= totpMaxAttempts {
 			outcome = verifyTooManyAttempts
 			return nil
 		}
@@ -263,7 +284,7 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if secret == "" || !totp.Validate(body.Code, secret) {
-			fctx.TOTPAttempts++
+			fctx.FactorAttempts++
 			outcome = verifyWrongCode
 			return storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx)
 		}
@@ -321,7 +342,7 @@ func (a *publicAPI) submitRecoveryTOTP(w http.ResponseWriter, r *http.Request) {
 		if !fctx.CodeOK {
 			return errRecoveryNotProven
 		}
-		if fctx.TOTPAttempts >= totpMaxAttempts {
+		if fctx.FactorAttempts >= totpMaxAttempts {
 			outcome = verifyTooManyAttempts
 			return nil
 		}
@@ -330,11 +351,11 @@ func (a *publicAPI) submitRecoveryTOTP(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if secret == "" || !totp.Validate(body.Code, secret) {
-			fctx.TOTPAttempts++
+			fctx.FactorAttempts++
 			outcome = verifyWrongCode
 			return storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx)
 		}
-		fctx.TOTPOK = true
+		fctx.SecondFactorOK = true
 		return storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx)
 	})
 	switch {

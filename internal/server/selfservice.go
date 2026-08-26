@@ -235,6 +235,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		verif *verificationInfo
 	)
 	var mfaRequired, enrollNeeded bool
+	var mfaMethods []string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
@@ -272,15 +273,16 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Second factor: an enrolled TOTP turns the flow into a held
+		// Second factor: any enrolled factor turns the flow into a held
 		// mfa_required state instead of a session.
 		if t.Config.EffectiveMFA() != tenant.MFAOff {
-			secret, err := totpSecret(r.Context(), tx, identityID)
+			methods, err := enrolledFactors(r.Context(), tx, identityID)
 			if err != nil {
 				return err
 			}
-			if secret != "" {
+			if len(methods) > 0 {
 				mfaRequired = true
+				mfaMethods = methods
 				return storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
 					IdentityID: identityID,
 					PasswordOK: true,
@@ -319,7 +321,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	if mfaRequired {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"state":   "mfa_required",
-			"methods": []string{"totp"},
+			"methods": mfaMethods,
 		})
 		return
 	}

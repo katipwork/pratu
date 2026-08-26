@@ -107,6 +107,7 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 
 	var outcome verifyOutcome
 	nextState := "set_password"
+	var factorMethods []string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
@@ -147,12 +148,13 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 		}
 		// Recovery does not bypass an enrolled second factor.
 		if !mfaHidden(t) {
-			secret, err := totpSecret(r.Context(), tx, fctx.IdentityID)
+			methods, err := enrolledFactors(r.Context(), tx, fctx.IdentityID)
 			if err != nil {
 				return err
 			}
-			if secret != "" {
-				nextState = "totp_required"
+			if len(methods) > 0 {
+				nextState = "second_factor_required"
+				factorMethods = methods
 			}
 		}
 		return nil
@@ -174,7 +176,11 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	case verifyWrongCode:
 		writeError(w, http.StatusBadRequest, "incorrect code")
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"state": nextState})
+		resp := map[string]any{"state": nextState}
+		if factorMethods != nil {
+			resp["methods"] = factorMethods
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -220,12 +226,12 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		}
 		aal = session.AAL1
 		if !mfaHidden(t) {
-			secret, err := totpSecret(r.Context(), tx, fctx.IdentityID)
+			methods, err := enrolledFactors(r.Context(), tx, fctx.IdentityID)
 			if err != nil {
 				return err
 			}
-			if secret != "" {
-				if !fctx.TOTPOK {
+			if len(methods) > 0 {
+				if !fctx.SecondFactorOK {
 					return errSecondFactorRequired
 				}
 				aal = session.AAL2
@@ -260,7 +266,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	case errors.Is(err, errRecoveryNotProven):
 		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
 	case errors.Is(err, errSecondFactorRequired):
-		writeError(w, http.StatusForbidden, "second factor required; submit your TOTP code first")
+		writeError(w, http.StatusForbidden, "second factor required; prove it via /self-service/recovery/totp or /self-service/recovery/sms first")
 	case err != nil:
 		internalError(w, err)
 	default:

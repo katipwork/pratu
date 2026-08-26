@@ -2,6 +2,8 @@ package identity
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -13,12 +15,27 @@ type Identity struct {
 	CreatedAt time.Time       `json:"created_at"`
 }
 
-// Credential kinds. Password is the only first factor in v1; TOTP is a
-// second factor.
+// Credential kinds. Password is the only first factor in v1; TOTP and SMS
+// are second factors (TOTP preferred when both are enrolled).
 const (
 	CredentialPassword = "password"
 	CredentialTOTP     = "totp"
+	CredentialSMS      = "sms"
 )
+
+var phonePattern = regexp.MustCompile(`^\+[1-9][0-9]{7,14}$`)
+
+// NormalizePhone canonicalizes a phone number to E.164-ish form, reporting
+// whether it is plausible.
+func NormalizePhone(s string) (string, bool) {
+	s = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '-' || r == '(' || r == ')' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(s))
+	return s, phonePattern.MatchString(s)
+}
 
 // Address channels.
 const (
