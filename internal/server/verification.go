@@ -23,14 +23,16 @@ type verificationInfo struct {
 	FlowID    string    `json:"flow_id"`
 	Channel   string    `json:"channel"`
 	Address   string    `json:"address"` // masked
+	CSRFToken string    `json:"csrf_token,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // startVerification creates a verification flow with a fresh One-Time
 // Code and enqueues its delivery, all within the caller's tenant
 // transaction. The send caps run first: when the address is over budget
-// the whole transaction unwinds via errRateLimited.
-func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tenant, identityID string, addr identity.Address, issueSession bool) (*verificationInfo, error) {
+// the whole transaction unwinds via errRateLimited. Browser-ness is
+// inherited from the parent flow so CSRF protection carries through.
+func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tenant, identityID string, addr identity.Address, issueSession, browser bool) (*verificationInfo, error) {
 	ctx := r.Context()
 	if err := a.allowSend(ctx, t, addr.Channel, addr.Value); err != nil {
 		return nil, err
@@ -39,7 +41,7 @@ func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tena
 		IdentityID:   identityID,
 		AddressID:    addr.ID,
 		IssueSession: issueSession,
-	})
+	}, browser)
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +59,18 @@ func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tena
 	if err != nil {
 		return nil, err
 	}
-	return &verificationInfo{
+	vi := &verificationInfo{
 		FlowID:    vf.ID,
 		Channel:   addr.Channel,
 		Address:   maskAddress(addr.Channel, addr.Value),
 		ExpiresAt: vf.ExpiresAt,
-	}, nil
+	}
+	if browser {
+		if secret := csrfSecret(r); secret != "" {
+			vi.CSRFToken = csrfToken(secret, vf.ID)
+		}
+	}
+	return vi, nil
 }
 
 type verifyOutcome int
@@ -82,7 +90,8 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -93,6 +102,7 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 		ident   *identity.Identity
 		sess    *session.Session
 		token   string
+		browser bool
 	)
 	// Failed attempts must still commit (the attempt counter is the code's
 	// brute-force budget), so non-infrastructure failures set outcome and
@@ -100,6 +110,10 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindVerification)
 		if err != nil {
+			return err
+		}
+		browser = f.Browser
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.VerificationContext
@@ -149,6 +163,10 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "verification flow not found or expired")
 		return
 	}
+	if errors.Is(err, errCSRF) {
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		return
+	}
 	if err != nil {
 		internalError(w, err)
 		return
@@ -165,7 +183,11 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{"state": "verified", "identity": ident}
 		if sess != nil {
 			resp["session"] = sess
-			resp["session_token"] = token
+			if browser {
+				setSessionCookie(w, r, token, sess.ExpiresAt)
+			} else {
+				resp["session_token"] = token
+			}
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -177,10 +199,19 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flowID := r.URL.Query().Get("flow")
+	var body struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if !readOptionalJSON(w, r, &body) {
+		return
+	}
 
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindVerification)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.VerificationContext
@@ -210,6 +241,8 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "verification flow not found or expired")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.As(err, &rl):
 		writeRateLimited(w, rl.retryAfter)
 	case err != nil:

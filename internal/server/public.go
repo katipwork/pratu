@@ -33,13 +33,16 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, providers: providers, log: log}
 
 	tenanted := http.NewServeMux()
-	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration))
+	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration, false))
+	tenanted.HandleFunc("GET /self-service/registration/browser", api.createFlowHandler(flow.KindRegistration, true))
 	tenanted.HandleFunc("POST /self-service/registration", api.submitRegistration)
-	tenanted.HandleFunc("POST /self-service/login/api", api.createFlowHandler(flow.KindLogin))
+	tenanted.HandleFunc("POST /self-service/login/api", api.createFlowHandler(flow.KindLogin, false))
+	tenanted.HandleFunc("GET /self-service/login/browser", api.createFlowHandler(flow.KindLogin, true))
 	tenanted.HandleFunc("POST /self-service/login", api.submitLogin)
 	tenanted.HandleFunc("POST /self-service/verification", api.submitVerification)
 	tenanted.HandleFunc("POST /self-service/verification/resend", api.resendVerification)
-	tenanted.HandleFunc("POST /self-service/recovery/api", api.createFlowHandler(flow.KindRecovery))
+	tenanted.HandleFunc("POST /self-service/recovery/api", api.createFlowHandler(flow.KindRecovery, false))
+	tenanted.HandleFunc("GET /self-service/recovery/browser", api.createFlowHandler(flow.KindRecovery, true))
 	tenanted.HandleFunc("POST /self-service/recovery", api.submitRecoveryAddress)
 	tenanted.HandleFunc("POST /self-service/recovery/code", api.submitRecoveryCode)
 	tenanted.HandleFunc("POST /self-service/recovery/totp", api.submitRecoveryTOTP)
@@ -65,6 +68,7 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
 	tenanted.HandleFunc("POST /oauth2/revoke", api.oauthRevoke)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
+	tenanted.HandleFunc("POST /self-service/logout", api.logout)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)

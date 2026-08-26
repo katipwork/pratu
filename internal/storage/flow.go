@@ -19,8 +19,9 @@ var ErrFlowNotFound = errors.New("flow not found or expired")
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // CreateFlow starts a new self-service flow for the current tenant.
-// flowContext carries server-side state (nil for flows that need none).
-func CreateFlow(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind, flowContext any) (*flow.Flow, error) {
+// flowContext carries server-side state (nil for flows that need none);
+// browser flows carry CSRF protection.
+func CreateFlow(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind, flowContext any, browser bool) (*flow.Flow, error) {
 	raw := []byte(`{}`)
 	if flowContext != nil {
 		var err error
@@ -28,11 +29,11 @@ func CreateFlow(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind,
 			return nil, err
 		}
 	}
-	f := &flow.Flow{Kind: kind, Context: raw}
+	f := &flow.Flow{Kind: kind, Context: raw, Browser: browser}
 	err := tx.QueryRow(ctx,
-		`INSERT INTO flows (tenant_id, kind, expires_at, context) VALUES ($1, $2, $3, $4)
+		`INSERT INTO flows (tenant_id, kind, expires_at, context, browser) VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id::text, expires_at`,
-		tenantID, kind, time.Now().Add(flow.Lifetime), raw,
+		tenantID, kind, time.Now().Add(flow.Lifetime), raw, browser,
 	).Scan(&f.ID, &f.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -48,10 +49,10 @@ func GetFlow(ctx context.Context, tx pgx.Tx, id string, kind flow.Kind) (*flow.F
 	}
 	f := &flow.Flow{Kind: kind}
 	err := tx.QueryRow(ctx,
-		`SELECT id::text, expires_at, context FROM flows
+		`SELECT id::text, expires_at, context, browser FROM flows
 		  WHERE id = $1 AND kind = $2 AND expires_at > now() FOR UPDATE`,
 		id, kind,
-	).Scan(&f.ID, &f.ExpiresAt, &f.Context)
+	).Scan(&f.ID, &f.ExpiresAt, &f.Context, &f.Browser)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrFlowNotFound
 	}
@@ -59,25 +60,6 @@ func GetFlow(ctx context.Context, tx pgx.Tx, id string, kind flow.Kind) (*flow.F
 		return nil, err
 	}
 	return f, nil
-}
-
-// ConsumeFlow atomically claims an unexpired flow of the given kind,
-// deleting it so it cannot be submitted twice.
-func ConsumeFlow(ctx context.Context, tx pgx.Tx, id string, kind flow.Kind) error {
-	if !uuidPattern.MatchString(id) {
-		return ErrFlowNotFound
-	}
-	tag, err := tx.Exec(ctx,
-		`DELETE FROM flows WHERE id = $1 AND kind = $2 AND expires_at > now()`,
-		id, kind,
-	)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrFlowNotFound
-	}
-	return nil
 }
 
 // UpdateFlowContext replaces a flow's server-side context.

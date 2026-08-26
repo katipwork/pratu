@@ -45,24 +45,36 @@ var dummyHash = func() string {
 // flow engine matures.
 type flowResponse struct {
 	flow.Flow
-	UI struct {
+	CSRFToken string `json:"csrf_token,omitempty"`
+	UI        struct {
 		Fields []identity.Field `json:"fields"`
 	} `json:"ui"`
 }
 
-func (a *publicAPI) createFlowHandler(kind flow.Kind) http.HandlerFunc {
+func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t := requestTenant(r)
 		if !a.allow(w, r, "flow:ip:"+clientIP(r), limitFlowCreatePerIP, time.Minute) {
 			return
 		}
+		var csrfSec string
+		if browser {
+			var err error
+			if csrfSec, err = ensureCSRFCookie(w, r); err != nil {
+				internalError(w, err)
+				return
+			}
+		}
 		var resp flowResponse
 		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, nil)
+			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, nil, browser)
 			if err != nil {
 				return err
 			}
 			resp.Flow = *f
+			if browser {
+				resp.CSRFToken = csrfToken(csrfSec, f.ID)
+			}
 			schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
 			if err != nil {
 				return err
@@ -100,9 +112,10 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Method   string          `json:"method"`
-		Traits   json.RawMessage `json:"traits"`
-		Password string          `json:"password"`
+		Method    string          `json:"method"`
+		Traits    json.RawMessage `json:"traits"`
+		Password  string          `json:"password"`
+		CSRFToken string          `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -127,9 +140,18 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		token       string
 		verif       *verificationInfo
 		holdSession bool
+		browser     bool
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-		if err := storage.ConsumeFlow(r.Context(), tx, flowID, flow.KindRegistration); err != nil {
+		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRegistration)
+		if err != nil {
+			return err
+		}
+		browser = f.Browser
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
+			return err
+		}
+		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
 			return err
 		}
 		schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
@@ -165,7 +187,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		}
 		holdSession = target != nil && t.Config.VerificationRequired()
 		if target != nil {
-			verif, err = a.startVerification(r, tx, t, ident.ID, *target, holdSession)
+			verif, err = a.startVerification(r, tx, t, ident.ID, *target, holdSession, f.Browser)
 			if err != nil {
 				return err
 			}
@@ -181,6 +203,8 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
 			writeError(w, http.StatusBadRequest, "registration flow not found or expired")
+		case errors.Is(err, errCSRF):
+			writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 		case errors.As(err, &ve):
 			writeError(w, http.StatusBadRequest, "invalid traits", ve.msgs...)
 		case errors.Is(err, storage.ErrIdentifierTaken):
@@ -201,8 +225,12 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		resp["state"] = "verification_required"
 	} else {
 		resp["state"] = "active"
-		resp["session_token"] = token
 		resp["session"] = sess
+		if browser {
+			setSessionCookie(w, r, token, sess.ExpiresAt)
+		} else {
+			resp["session_token"] = token
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -215,6 +243,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		Method     string `json:"method"`
 		Identifier string `json:"identifier"`
 		Password   string `json:"password"`
+		CSRFToken  string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -236,11 +265,15 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		token string
 		verif *verificationInfo
 	)
-	var mfaRequired, enrollNeeded bool
+	var mfaRequired, enrollNeeded, browser bool
 	var mfaMethods []string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
+			return err
+		}
+		browser = f.Browser
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		identityID, hash, err := storage.PasswordCredential(r.Context(), tx, identity.Normalize(body.Identifier))
@@ -270,7 +303,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if unverified := allUnverified(addrs); unverified != nil {
-				verif, err = a.startVerification(r, tx, t, identityID, *unverified, true)
+				verif, err = a.startVerification(r, tx, t, identityID, *unverified, true, f.Browser)
 				return err
 			}
 		}
@@ -304,6 +337,8 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
 			writeError(w, http.StatusBadRequest, "login flow not found or expired")
+		case errors.Is(err, errCSRF):
+			writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 		case errors.Is(err, errInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 		case errors.As(err, &rl):
@@ -332,11 +367,13 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	if enrollNeeded {
 		state = "mfa_enrollment_required"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"state":         state,
-		"session_token": token,
-		"session":       sess,
-	})
+	resp := map[string]any{"state": state, "session": sess}
+	if browser {
+		setSessionCookie(w, r, token, sess.ExpiresAt)
+	} else {
+		resp["session_token"] = token
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // validatePassword enforces the tenant's password policy, answering the
@@ -376,18 +413,26 @@ func allUnverified(addrs []identity.Address) *identity.Address {
 	return first
 }
 
-// bearerToken extracts the presented session token, if any.
-func bearerToken(r *http.Request) string {
-	token := r.Header.Get("X-Session-Token")
-	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+// sessionToken extracts the presented session token and whether it came
+// from the cookie (cookie-sourced requests need CSRF proof for
+// state-changing endpoints; header-sourced ones cannot be forged
+// cross-site).
+func sessionToken(r *http.Request) (token string, fromCookie bool) {
+	if t := r.Header.Get("X-Session-Token"); t != "" {
+		return t, false
 	}
-	return token
+	if t := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); t != "" && t != r.Header.Get("Authorization") {
+		return t, false
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		return c.Value, true
+	}
+	return "", false
 }
 
 func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
-	token := bearerToken(r)
+	token, fromCookie := sessionToken(r)
 	if token == "" {
 		writeError(w, http.StatusUnauthorized, "no session token")
 		return
@@ -419,10 +464,44 @@ func (a *publicAPI) whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"session":  sess,
 		"identity": ident,
+	}
+	if fromCookie {
+		// SPAs bootstrap their CSRF token here; CORS keeps it from
+		// cross-origin readers.
+		secret, err := ensureCSRFCookie(w, r)
+		if err != nil {
+			internalError(w, err)
+			return
+		}
+		resp["csrf_token"] = csrfToken(secret, csrfSessionScope)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// logout revokes the current session and clears the cookie.
+func (a *publicAPI) logout(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		sess, err := requireSession(r.Context(), tx, r, true)
+		if err != nil {
+			return err
+		}
+		return storage.DeleteSession(r.Context(), tx, sess.ID)
 	})
+	switch {
+	case errors.Is(err, errNoSession):
+		writeError(w, http.StatusUnauthorized, "no session")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "csrf token missing or invalid (X-CSRF-Token)")
+	case err != nil:
+		internalError(w, err)
+	default:
+		clearSessionCookie(w, r)
+		writeJSON(w, http.StatusOK, map[string]string{"state": "logged_out"})
+	}
 }
 
 var errInvalidCredentials = errors.New("invalid credentials")

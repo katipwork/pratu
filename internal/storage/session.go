@@ -39,6 +39,12 @@ func RaiseSessionAAL(ctx context.Context, tx pgx.Tx, id string) error {
 	return err
 }
 
+// DeleteSession removes one session (logout).
+func DeleteSession(ctx context.Context, tx pgx.Tx, id string) error {
+	_, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	return err
+}
+
 // RevokeSessions deletes every session belonging to an identity; recovery
 // calls this before issuing the fresh one.
 func RevokeSessions(ctx context.Context, tx pgx.Tx, identityID string) (int64, error) {

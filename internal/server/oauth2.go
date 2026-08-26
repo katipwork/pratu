@@ -112,7 +112,7 @@ func (a *publicAPI) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		f, err := storage.CreateFlow(octx, tx, t.ID, flow.KindOAuth2, flow.OAuth2Context{
 			Query: r.URL.RawQuery,
-		})
+		}, false)
 		if err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 
 	var redirectTo string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-		sess, err := requireSession(r.Context(), tx, r)
+		sess, err := requireSession(r.Context(), tx, r, true)
 		if err != nil {
 			return err
 		}
@@ -219,6 +219,8 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errNoSession):
 		writeError(w, http.StatusUnauthorized, "session required: log the user in first")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "csrf token missing or invalid (X-CSRF-Token)")
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "challenge not found or expired")
 	case err != nil:

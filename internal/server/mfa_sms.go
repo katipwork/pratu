@@ -104,13 +104,24 @@ func (a *publicAPI) enrollSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, fromCookie := sessionToken(r)
+	var csrfSec string
+	if fromCookie {
+		var err error
+		if csrfSec, err = ensureCSRFCookie(w, r); err != nil {
+			internalError(w, err)
+			return
+		}
+	}
+
 	var resp struct {
 		FlowID    string    `json:"flow_id"`
 		Address   string    `json:"address"`
+		CSRFToken string    `json:"csrf_token,omitempty"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-		sess, err := requireSession(r.Context(), tx, r)
+		sess, err := requireSession(r.Context(), tx, r, true)
 		if err != nil {
 			return err
 		}
@@ -125,7 +136,7 @@ func (a *publicAPI) enrollSMS(w http.ResponseWriter, r *http.Request) {
 			IdentityID: sess.IdentityID,
 			SessionID:  sess.ID,
 			Phone:      phone,
-		})
+		}, fromCookie)
 		if err != nil {
 			return err
 		}
@@ -133,12 +144,17 @@ func (a *publicAPI) enrollSMS(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		resp.FlowID, resp.Address, resp.ExpiresAt = f.ID, maskAddress(identity.ChannelSMS, phone), f.ExpiresAt
+		if fromCookie {
+			resp.CSRFToken = csrfToken(csrfSec, f.ID)
+		}
 		return nil
 	})
 	var rl errRateLimited
 	switch {
 	case errors.Is(err, errNoSession):
 		writeError(w, http.StatusUnauthorized, "session required")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "csrf token missing or invalid (X-CSRF-Token)")
 	case errors.Is(err, errAlreadyEnrolled):
 		writeError(w, http.StatusConflict, "an SMS factor is already enrolled; remove it first")
 	case errors.As(err, &rl):
@@ -164,7 +180,8 @@ func (a *publicAPI) confirmSMS(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -176,12 +193,15 @@ func (a *publicAPI) confirmSMS(w http.ResponseWriter, r *http.Request) {
 	)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		var err error
-		sess, err = requireSession(r.Context(), tx, r)
+		sess, err = requireSession(r.Context(), tx, r, true)
 		if err != nil {
 			return err
 		}
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindSMSEnroll)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.SMSEnrollContext
@@ -208,6 +228,8 @@ func (a *publicAPI) confirmSMS(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errNoSession):
 		writeError(w, http.StatusUnauthorized, "session required")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf token")
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "enrolment flow not found or expired")
 	case err != nil:
@@ -228,7 +250,7 @@ func (a *publicAPI) confirmSMS(w http.ResponseWriter, r *http.Request) {
 func (a *publicAPI) unenrollSMS(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-		sess, err := requireSession(r.Context(), tx, r)
+		sess, err := requireSession(r.Context(), tx, r, true)
 		if err != nil {
 			return err
 		}
@@ -240,6 +262,8 @@ func (a *publicAPI) unenrollSMS(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errNoSession):
 		writeError(w, http.StatusUnauthorized, "session required")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "csrf token missing or invalid (X-CSRF-Token)")
 	case errors.Is(err, errAAL2Required):
 		writeError(w, http.StatusForbidden, "removing the second factor requires an aal2 session")
 	case err != nil:
@@ -257,11 +281,20 @@ func (a *publicAPI) loginSMSSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flowID := r.URL.Query().Get("flow")
+	var body struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if !readOptionalJSON(w, r, &body) {
+		return
+	}
 
 	var masked string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.LoginContext
@@ -293,7 +326,8 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -303,10 +337,15 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 		outcome verifyOutcome
 		sess    *session.Session
 		token   string
+		browser bool
 	)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
+			return err
+		}
+		browser = f.Browser
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.LoginContext
@@ -329,6 +368,8 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "login flow not found or expired")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 	case err != nil:
 		internalError(w, err)
 	case outcome == verifyTooManyAttempts:
@@ -338,11 +379,13 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 	case outcome == verifyWrongCode:
 		writeError(w, http.StatusUnauthorized, "incorrect code")
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{
-			"state":         "active",
-			"session":       sess,
-			"session_token": token,
-		})
+		resp := map[string]any{"state": "active", "session": sess}
+		if browser {
+			setSessionCookie(w, r, token, sess.ExpiresAt)
+		} else {
+			resp["session_token"] = token
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -354,11 +397,20 @@ func (a *publicAPI) recoverySMSSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flowID := r.URL.Query().Get("flow")
+	var body struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if !readOptionalJSON(w, r, &body) {
+		return
+	}
 
 	var masked string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.RecoveryContext
@@ -392,7 +444,8 @@ func (a *publicAPI) recoverySMSSubmit(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -402,6 +455,9 @@ func (a *publicAPI) recoverySMSSubmit(w http.ResponseWriter, r *http.Request) {
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.RecoveryContext
@@ -421,6 +477,8 @@ func (a *publicAPI) recoverySMSSubmit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
 		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
 	case err != nil:
@@ -441,6 +499,8 @@ func (a *publicAPI) respondFactorSend(w http.ResponseWriter, err error, masked s
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "flow not found or expired")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
 		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
 	case errors.Is(err, errNoSMSFactor):

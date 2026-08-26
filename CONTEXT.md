@@ -52,5 +52,9 @@ The component that delivers One-Time Codes and notifications over email and SMS,
 _Avoid_: Mailer, notifier, sender
 
 **Self-Service Flow**:
-A stateful, server-driven interaction (login, registration, recovery, …) exposed as JSON describing its UI nodes and errors; clients render it however they like. The server is headless — it ships no UI.
+A stateful, server-driven interaction (login, registration, recovery, …) exposed as JSON describing its UI nodes and errors; clients render it however they like. The server is headless — it ships no UI. A flow is either an API flow (bearer tokens, no cookies) or a Browser Flow.
 _Avoid_: Form, wizard, journey
+
+**Browser Flow**:
+A Self-Service Flow whose client authenticates with the host-scoped session cookie instead of bearer tokens; it carries CSRF protection, and completing it sets the cookie rather than returning a session token.
+_Avoid_: Web flow, cookie mode

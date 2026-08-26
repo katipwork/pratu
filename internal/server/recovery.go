@@ -30,7 +30,8 @@ func (a *publicAPI) submitRecoveryAddress(w http.ResponseWriter, r *http.Request
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Address string `json:"address"`
+		Address   string `json:"address"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -39,6 +40,9 @@ func (a *publicAPI) submitRecoveryAddress(w http.ResponseWriter, r *http.Request
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		addr, identityID, err := storage.FindRecoveryAddress(r.Context(), tx, identity.Normalize(body.Address))
@@ -81,6 +85,10 @@ func (a *publicAPI) submitRecoveryAddress(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
 		return
 	}
+	if errors.Is(err, errCSRF) {
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		return
+	}
 	if err != nil {
 		internalError(w, err)
 		return
@@ -99,7 +107,8 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Code string `json:"code"`
+		Code      string `json:"code"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -111,6 +120,9 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
+			return err
+		}
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.RecoveryContext
@@ -163,6 +175,10 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
 		return
 	}
+	if errors.Is(err, errCSRF) {
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		return
+	}
 	if err != nil {
 		internalError(w, err)
 		return
@@ -192,7 +208,8 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	flowID := r.URL.Query().Get("flow")
 
 	var body struct {
-		Password string `json:"password"`
+		Password  string `json:"password"`
+		CSRFToken string `json:"csrf_token"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -207,14 +224,19 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		ident *identity.Identity
-		sess  *session.Session
-		token string
-		aal   string
+		ident   *identity.Identity
+		sess    *session.Session
+		token   string
+		aal     string
+		browser bool
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
 		if err != nil {
+			return err
+		}
+		browser = f.Browser
+		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
 		var fctx flow.RecoveryContext
@@ -263,6 +285,8 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+	case errors.Is(err, errCSRF):
+		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
 		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
 	case errors.Is(err, errSecondFactorRequired):
@@ -270,12 +294,17 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	case err != nil:
 		internalError(w, err)
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{
-			"state":         "recovered",
-			"identity":      ident,
-			"session":       sess,
-			"session_token": token,
-		})
+		resp := map[string]any{
+			"state":    "recovered",
+			"identity": ident,
+			"session":  sess,
+		}
+		if browser {
+			setSessionCookie(w, r, token, sess.ExpiresAt)
+		} else {
+			resp["session_token"] = token
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 

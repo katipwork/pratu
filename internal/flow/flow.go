@@ -26,6 +26,7 @@ type Flow struct {
 	ID        string          `json:"id"`
 	Kind      Kind            `json:"kind"`
 	ExpiresAt time.Time       `json:"expires_at"`
+	Browser   bool            `json:"-"`
 	Context   json.RawMessage `json:"-"`
 }
 
