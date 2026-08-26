@@ -78,6 +78,12 @@ type SMSEnrollContext struct {
 	Phone      string `json:"phone"`
 }
 
+// RegistrationContext pins the schema version chosen when the flow was
+// created, so a schema update mid-flow cannot shift validation.
+type RegistrationContext struct {
+	SchemaID string `json:"schema_id,omitempty"`
+}
+
 // OAuth2Context is a Login/Consent Challenge: the parked authorization
 // request, waiting for the tenant's login UI to prove a user and accept.
 type OAuth2Context struct {

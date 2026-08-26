@@ -67,20 +67,21 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 		}
 		var resp flowResponse
 		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
-			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, nil, browser)
-			if err != nil {
-				return err
-			}
-			resp.Flow = *f
-			if browser {
-				resp.CSRFToken = csrfToken(csrfSec, f.ID)
-			}
-			schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
-			if err != nil {
-				return err
-			}
+			var flowContext any
 			switch kind {
 			case flow.KindRegistration:
+				// The schema (selectable via ?schema=, defaulting to
+				// "default") is pinned into the flow so a mid-flow schema
+				// update cannot shift validation.
+				name := r.URL.Query().Get("schema")
+				if name == "" {
+					name = "default"
+				}
+				schema, err := storage.CurrentSchema(r.Context(), tx, name)
+				if err != nil {
+					return err
+				}
+				flowContext = flow.RegistrationContext{SchemaID: schema.ID}
 				fields := append([]identity.Field(nil), schema.Fields()...)
 				resp.UI.Fields = append(fields,
 					identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
@@ -94,8 +95,20 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 					{Name: "password", Type: "password", Title: "Password", Required: true},
 				}
 			}
+			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, flowContext, browser)
+			if err != nil {
+				return err
+			}
+			resp.Flow = *f
+			if browser {
+				resp.CSRFToken = csrfToken(csrfSec, f.ID)
+			}
 			return nil
 		})
+		if errors.Is(err, storage.ErrSchemaNotFound) {
+			writeError(w, http.StatusBadRequest, "unknown identity schema")
+			return
+		}
 		if err != nil {
 			internalError(w, err)
 			return
@@ -154,7 +167,17 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
 			return err
 		}
-		schema, err := storage.DefaultIdentitySchema(r.Context(), tx)
+		var fctx flow.RegistrationContext
+		if err := json.Unmarshal(f.Context, &fctx); err != nil {
+			return err
+		}
+		var schema *identity.Schema
+		if fctx.SchemaID != "" {
+			schema, err = storage.SchemaByID(r.Context(), tx, fctx.SchemaID)
+		} else {
+			// Flows created before schema pinning existed.
+			schema, err = storage.CurrentSchema(r.Context(), tx, "default")
+		}
 		if err != nil {
 			return err
 		}

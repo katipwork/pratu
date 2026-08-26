@@ -17,7 +17,7 @@ The identity's own data (email, phone, name, …), validated by the tenant's Ide
 _Avoid_: Attributes, profile, metadata
 
 **Identity Schema**:
-A JSON Schema, defined per tenant, that validates traits and annotates which traits serve as login identifiers and verification/recovery addresses.
+A JSON Schema, defined per tenant, that validates traits and annotates which traits serve as login identifiers and verification/recovery addresses. Schemas are named and versioned: updating one appends an immutable new version, and each identity keeps the version that validated it.
 _Avoid_: User model, custom fields
 
 **Session**:

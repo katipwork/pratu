@@ -35,6 +35,9 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string, providers *oauth2.Providers) h
 	api.HandleFunc("POST /admin/tenants/{slug}/keys/rotate", admin.rotateKey)
 	api.HandleFunc("GET /admin/tenants/{slug}/keys", admin.listKeys)
 	api.HandleFunc("DELETE /admin/tenants/{slug}/keys/{kid}", admin.deleteKey)
+	api.HandleFunc("GET /admin/tenants/{slug}/schemas", admin.listSchemas)
+	api.HandleFunc("GET /admin/tenants/{slug}/schemas/{name}", admin.getSchema)
+	api.HandleFunc("PUT /admin/tenants/{slug}/schemas/{name}", admin.putSchema)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)

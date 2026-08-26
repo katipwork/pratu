@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,20 +37,95 @@ func CreateIdentitySchema(ctx context.Context, tx pgx.Tx, tenantID, name string,
 	return id, err
 }
 
-// DefaultIdentitySchema loads and compiles the tenant's "default" schema.
-func DefaultIdentitySchema(ctx context.Context, tx pgx.Tx) (*identity.Schema, error) {
+var ErrSchemaNotFound = errors.New("identity schema not found")
+
+// CurrentSchema loads and compiles the newest version of a named schema.
+func CurrentSchema(ctx context.Context, tx pgx.Tx, name string) (*identity.Schema, error) {
 	var id string
 	var raw json.RawMessage
 	err := tx.QueryRow(ctx,
-		`SELECT id::text, schema FROM identity_schemas WHERE name = 'default'`,
+		`SELECT id::text, schema FROM identity_schemas WHERE name = $1
+		 ORDER BY version DESC LIMIT 1`, name,
 	).Scan(&id, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errors.New("tenant has no default identity schema")
+		return nil, ErrSchemaNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return identity.ParseSchema(id, "default", raw)
+	return identity.ParseSchema(id, name, raw)
+}
+
+// SchemaByID loads the exact schema version a flow or identity pinned.
+func SchemaByID(ctx context.Context, tx pgx.Tx, id string) (*identity.Schema, error) {
+	var name string
+	var raw json.RawMessage
+	err := tx.QueryRow(ctx,
+		`SELECT name, schema FROM identity_schemas WHERE id = $1`, id,
+	).Scan(&name, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrSchemaNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return identity.ParseSchema(id, name, raw)
+}
+
+// SchemaInfo describes one stored schema version.
+type SchemaInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListSchemas lists every schema version, newest first per name.
+func ListSchemas(ctx context.Context, tx pgx.Tx) ([]SchemaInfo, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id::text, name, version, created_at FROM identity_schemas
+		 ORDER BY name, version DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SchemaInfo
+	for rows.Next() {
+		var s SchemaInfo
+		if err := rows.Scan(&s.ID, &s.Name, &s.Version, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// CurrentSchemaRaw returns the newest version's raw JSON and metadata.
+func CurrentSchemaRaw(ctx context.Context, tx pgx.Tx, name string) (*SchemaInfo, json.RawMessage, error) {
+	var info SchemaInfo
+	var raw json.RawMessage
+	err := tx.QueryRow(ctx,
+		`SELECT id::text, name, version, created_at, schema FROM identity_schemas
+		  WHERE name = $1 ORDER BY version DESC LIMIT 1`, name,
+	).Scan(&info.ID, &info.Name, &info.Version, &info.CreatedAt, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, ErrSchemaNotFound
+	}
+	return &info, raw, err
+}
+
+// PutSchemaVersion appends a new immutable version of a named schema
+// (version 1 when the name is new).
+func PutSchemaVersion(ctx context.Context, tx pgx.Tx, tenantID, name string, raw json.RawMessage) (*SchemaInfo, error) {
+	var info SchemaInfo
+	err := tx.QueryRow(ctx,
+		`INSERT INTO identity_schemas (tenant_id, name, schema, version)
+		 SELECT $1, $2, $3, coalesce(max(version), 0) + 1
+		   FROM identity_schemas WHERE tenant_id = $1 AND name = $2
+		 RETURNING id::text, name, version, created_at`,
+		tenantID, name, raw,
+	).Scan(&info.ID, &info.Name, &info.Version, &info.CreatedAt)
+	return &info, err
 }
 
 // CreateIdentity inserts an identity with a password credential and its

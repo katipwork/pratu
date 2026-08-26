@@ -213,6 +213,12 @@ func (s *Schema) Addresses(traits []byte) []AddressSpec {
 	return out
 }
 
+// HasIdentifier reports whether any property is annotated as a login
+// identifier — a schema without one cannot register anybody.
+func (s *Schema) HasIdentifier() bool {
+	return len(s.identifiers) > 0
+}
+
 // Fields lists the top-level traits for building flow UIs.
 func (s *Schema) Fields() []Field {
 	return s.fields
