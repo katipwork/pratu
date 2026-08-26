@@ -6,7 +6,7 @@
 
 ## What it does
 
-- **Multi-tenancy as the core primitive**: each tenant is a fully isolated identity namespace — its own end-users, schemas, OAuth2 clients, signing keys, and policy — addressed by its own hostname (`{slug}.{base_domain}`), which makes cookie isolation browser-enforced and gives every tenant its own OIDC issuer. Isolation is defended in depth by Postgres row-level security; the server refuses to run under a role that bypasses RLS.
+- **Multi-tenancy as the core primitive**: each tenant is a fully isolated identity namespace — its own end-users, schemas, OAuth2 clients, signing keys, and policy — addressed by its own hostname (`{slug}.{base_domain}`, or claimed custom domains with TLS at your fronting proxy), which makes cookie isolation browser-enforced and gives every tenant its own OIDC issuer. Isolation is defended in depth by Postgres row-level security; the server refuses to run under a role that bypasses RLS.
 - **Schema-driven identities**: per-tenant, named, versioned JSON Schemas validate identity traits and annotate which traits are login identifiers and verification/recovery addresses. Old identities keep the schema version that validated them.
 - **Self-service flows**, API-token and browser-cookie (CSRF-protected) alike: registration with verify-before-first-session policy, login, recovery (one-time codes, anti-enumeration, revokes other sessions, never bypasses MFA), verification, logout.
 - **Credentials & MFA**: Argon2id passwords under a NIST 800-63B policy (length + Pwned-Passwords k-anonymity breach check; deliberately no composition rules), TOTP and SMS one-time codes as second factors with aal1/aal2 sessions.
@@ -15,6 +15,7 @@
 - **Sessions** are server-side, listable, and revocable — per device, "log out other devices", and an admin kill-switch.
 - **Abuse protection**: Postgres-backed rate limits per IP and per identifier, SMS-pumping caps (per phone, per tenant), uniform anti-enumeration responses.
 - **Operations**: message delivery through an outbox-drained Courier (log/webhook drivers), at-rest AES-256-GCM encryption for impersonation-grade secrets with key rotation, expired-row janitors, trusted-proxy support for forwarded headers, single binary, one YAML config with env overrides.
+- **Reference login UI** (optional, `public.reference_ui`): an embedded zero-build page at `/ui/` covering every flow — a working login experience before a tenant builds its own, and copyable example code.
 
 The domain vocabulary lives in [CONTEXT.md](CONTEXT.md); load-bearing decisions in [docs/adr](docs/adr). The API is specified in [api/public.openapi.yaml](api/public.openapi.yaml) (tenant-facing self-service + OAuth2) and [api/admin.openapi.yaml](api/admin.openapi.yaml) (management plane).
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.2.0 — 2026-08-26
+
+- Custom domains: tenants claim hostnames outside the base domain
+  (admin CRUD; globally unique, base-domain shadowing refused). The
+  resolver falls back from subdomain to the domain table; issuer, JWKS,
+  cookies, and flows follow the Host automatically. TLS for custom
+  domains is the fronting proxy's job (see ADR 0003).
+- Reference login UI: an optional embedded page (`public.reference_ui`)
+  at `/ui/` driving every browser flow — login, schema-rendered
+  registration, verification, TOTP/SMS, recovery, social buttons, and
+  the OAuth2 login/consent handshake. Off by default; the server stays
+  headless.
+- `GET /self-service/social`: public listing of a tenant's social
+  providers (ids/labels) for rendering sign-in buttons.
+- OpenAPI 3.0 specs for both APIs (`api/*.openapi.yaml`), validated and
+  mechanically cross-checked against the registered routes.
+- SECURITY.md with private vulnerability reporting (enabled on GitHub),
+  scope, and a deployment hardening checklist.
+- Startup log line when the reference UI is enabled.
+
 ## v0.1.0 — 2026-08-26
 
 First release. Everything below is new.
