@@ -133,6 +133,9 @@ func serve(log *slog.Logger, args []string) error {
 		log.Warn("oauth2.system_secret not set; OAuth2 provider endpoints are disabled")
 	}
 
+	if cfg.Public.ReferenceUI {
+		log.Info("reference login UI enabled at /ui/ on tenant hostnames")
+	}
 	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, providers, cfg.Public.ReferenceUI, log)}
 	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey, providers)}
 

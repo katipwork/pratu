@@ -3,3 +3,4 @@
 pratu.yaml
 *.test
 .env
+*.log
