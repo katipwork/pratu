@@ -44,6 +44,9 @@ type Config struct {
 	SMSDailyCap int `json:"sms_daily_cap,omitempty"`
 	// MFA is the second-factor policy: off, optional (default), required.
 	MFA string `json:"mfa,omitempty"`
+	// LoginURL is the tenant's own login UI; OAuth2 authorization
+	// requests redirect there with a login_challenge (Hydra-style).
+	LoginURL string `json:"login_url,omitempty"`
 }
 
 func (c Config) EffectiveMFA() string {

@@ -24,6 +24,12 @@ database:
 #   # (per-tenant setting, on by default, fails open when unreachable).
 #   base_url: https://api.pwnedpasswords.com/range/
 
+oauth2:
+  # HMAC secret for authorize codes and refresh tokens (min 32 chars).
+  # Leave empty to disable the OAuth2/OIDC provider endpoints. Set via
+  # PRATU_OAUTH2_SYSTEM_SECRET in production.
+  system_secret: ""
+
 courier:
   # "log" prints messages (including one-time codes!) to the server log —
   # dev only. "webhook" POSTs each message as JSON to webhook_url.

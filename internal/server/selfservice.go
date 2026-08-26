@@ -15,6 +15,7 @@ import (
 
 	"github.com/katipwork/pratu/internal/flow"
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/session"
@@ -23,10 +24,11 @@ import (
 )
 
 type publicAPI struct {
-	pool    *pgxpool.Pool
-	breach  password.BreachChecker
-	limiter *ratelimit.Limiter
-	log     *slog.Logger
+	pool      *pgxpool.Pool
+	breach    password.BreachChecker
+	limiter   *ratelimit.Limiter
+	providers *oauth2.Providers // nil disables the OAuth2 endpoints
+	log       *slog.Logger
 }
 
 // dummyHash keeps login timing uniform when the identifier is unknown.

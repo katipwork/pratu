@@ -16,6 +16,7 @@ import (
 
 	"github.com/katipwork/pratu/internal/config"
 	"github.com/katipwork/pratu/internal/courier"
+	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/server"
@@ -102,7 +103,14 @@ func serve(log *slog.Logger, args []string) error {
 	limiter := ratelimit.New(pool)
 	go cleanupRateLimits(ctx, log, limiter)
 
-	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, log)}
+	var providers *oauth2.Providers
+	if cfg.OAuth2.SystemSecret != "" {
+		providers = oauth2.NewProviders([]byte(cfg.OAuth2.SystemSecret))
+	} else {
+		log.Warn("oauth2.system_secret not set; OAuth2 provider endpoints are disabled")
+	}
+
+	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, providers, log)}
 	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
 
 	errc := make(chan error, 2)

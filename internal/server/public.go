@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/katipwork/pratu/internal/flow"
+	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -28,8 +29,8 @@ func requestTenant(r *http.Request) *tenant.Tenant {
 // NewPublic builds the tenant-facing handler. Health checks are
 // tenant-agnostic; everything else resolves the tenant from the Host
 // header first.
-func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, log *slog.Logger) http.Handler {
-	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, log: log}
+func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, providers *oauth2.Providers, log *slog.Logger) http.Handler {
+	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, providers: providers, log: log}
 
 	tenanted := http.NewServeMux()
 	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration))
@@ -54,6 +55,15 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /self-service/mfa/sms/enroll", api.enrollSMS)
 	tenanted.HandleFunc("POST /self-service/mfa/sms/confirm", api.confirmSMS)
 	tenanted.HandleFunc("DELETE /self-service/mfa/sms", api.unenrollSMS)
+	tenanted.HandleFunc("GET /.well-known/openid-configuration", api.oauthDiscovery)
+	tenanted.HandleFunc("GET /.well-known/jwks.json", api.oauthJWKS)
+	tenanted.HandleFunc("GET /oauth2/auth", api.oauthAuthorize)
+	tenanted.HandleFunc("GET /oauth2/auth/requests/{challenge}", api.oauthChallengeInfo)
+	tenanted.HandleFunc("POST /oauth2/auth/accept", api.oauthAccept)
+	tenanted.HandleFunc("GET /oauth2/auth/finish", api.oauthFinish)
+	tenanted.HandleFunc("POST /oauth2/token", api.oauthToken)
+	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
+	tenanted.HandleFunc("POST /oauth2/revoke", api.oauthRevoke)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
 
 	mux := http.NewServeMux()

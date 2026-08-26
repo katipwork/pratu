@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,12 +20,15 @@ import (
 // and is never routed through tenant hostnames. Health checks are open;
 // everything under /admin/ requires the root API key.
 func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
-	admin := &adminAPI{tenants: storage.NewTenantStore(pool)}
+	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool)}
 
 	api := http.NewServeMux()
 	api.HandleFunc("POST /admin/tenants", admin.createTenant)
 	api.HandleFunc("GET /admin/tenants", admin.listTenants)
 	api.HandleFunc("GET /admin/tenants/{slug}", admin.getTenant)
+	api.HandleFunc("POST /admin/tenants/{slug}/clients", admin.createClient)
+	api.HandleFunc("GET /admin/tenants/{slug}/clients", admin.listClients)
+	api.HandleFunc("DELETE /admin/tenants/{slug}/clients/{id}", admin.deleteClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
@@ -50,6 +54,7 @@ func requireRootKey(rootKey string, next http.Handler) http.Handler {
 }
 
 type adminAPI struct {
+	pool    *pgxpool.Pool
 	tenants *storage.TenantStore
 }
 
@@ -65,6 +70,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		Password     tenant.PasswordConfig `json:"password"`
 		SMSDailyCap  int                   `json:"sms_daily_cap"`
 		MFA          string                `json:"mfa"`
+		LoginURL     string                `json:"login_url"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -101,11 +107,19 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.LoginURL != "" {
+		if u, err := url.Parse(body.LoginURL); err != nil || !u.IsAbs() {
+			writeError(w, http.StatusBadRequest, "login_url must be an absolute URL")
+			return
+		}
+	}
+
 	cfg := tenant.Config{
 		Verification: body.Verification,
 		Password:     body.Password,
 		SMSDailyCap:  body.SMSDailyCap,
 		MFA:          body.MFA,
+		LoginURL:     body.LoginURL,
 	}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {

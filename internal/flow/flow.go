@@ -16,6 +16,7 @@ const (
 	KindRecovery     Kind = "recovery"
 	KindTOTPEnroll   Kind = "totp_enroll"
 	KindSMSEnroll    Kind = "sms_enroll"
+	KindOAuth2       Kind = "oauth2"
 )
 
 // Lifetime is how long a flow may sit unsubmitted.
@@ -74,4 +75,14 @@ type SMSEnrollContext struct {
 	IdentityID string `json:"identity_id"`
 	SessionID  string `json:"session_id"`
 	Phone      string `json:"phone"`
+}
+
+// OAuth2Context is a Login/Consent Challenge: the parked authorization
+// request, waiting for the tenant's login UI to prove a user and accept.
+type OAuth2Context struct {
+	Query      string `json:"query"` // the original /oauth2/auth query string
+	IdentityID string `json:"identity_id,omitempty"`
+	AAL        string `json:"aal,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Granted    bool   `json:"granted,omitempty"`
 }

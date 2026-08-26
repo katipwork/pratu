@@ -19,6 +19,14 @@ type Config struct {
 	Database   Database `yaml:"database"`
 	Courier    Courier  `yaml:"courier"`
 	HIBP       HIBP     `yaml:"hibp"`
+	OAuth2     OAuth2   `yaml:"oauth2"`
+}
+
+type OAuth2 struct {
+	// SystemSecret keys the HMAC over authorize codes and refresh tokens
+	// (min 32 chars). When empty, the OAuth2 provider endpoints are
+	// disabled.
+	SystemSecret string `yaml:"system_secret"`
 }
 
 type HIBP struct {
@@ -81,12 +89,16 @@ func Load(path string) (Config, error) {
 	override(&cfg.Courier.Driver, "PRATU_COURIER_DRIVER")
 	override(&cfg.Courier.WebhookURL, "PRATU_COURIER_WEBHOOK_URL")
 	override(&cfg.HIBP.BaseURL, "PRATU_HIBP_BASE_URL")
+	override(&cfg.OAuth2.SystemSecret, "PRATU_OAUTH2_SYSTEM_SECRET")
 
 	if cfg.BaseDomain == "" {
 		return Config{}, errors.New("base_domain is required (or set PRATU_BASE_DOMAIN)")
 	}
 	if cfg.Database.URL == "" {
 		return Config{}, errors.New("database.url is required (or set PRATU_DATABASE_URL)")
+	}
+	if s := cfg.OAuth2.SystemSecret; s != "" && len(s) < 32 {
+		return Config{}, errors.New("oauth2.system_secret must be at least 32 characters")
 	}
 	switch cfg.Courier.Driver {
 	case "log":
