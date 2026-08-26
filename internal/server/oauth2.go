@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ory/fosite"
 
 	"github.com/katipwork/pratu/internal/flow"
 	oauth2pkg "github.com/katipwork/pratu/internal/oauth2"
@@ -176,8 +177,9 @@ func (a *publicAPI) oauthChallengeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // oauthAccept records that the tenant's UI proved a user (session token)
-// and — for now — that consent covers the requested scopes. First-party
-// clients skip the consent screen by policy; the accept is the same.
+// and which scopes were consented to. First-party clients skip the
+// consent screen by policy, so their grants default to everything
+// requested; third-party clients must send an explicit grant_scopes.
 func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 	if !a.requireOAuth(w) {
 		return
@@ -185,6 +187,13 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 	t := requestTenant(r)
 	challenge := r.URL.Query().Get("challenge")
 	issuer := issuerFromRequest(r)
+
+	var body struct {
+		GrantScopes []string `json:"grant_scopes"`
+	}
+	if !readOptionalJSON(w, r, &body) {
+		return
+	}
 
 	var redirectTo string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
@@ -200,6 +209,34 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(f.Context, &fctx); err != nil {
 			return err
 		}
+		q, err := url.ParseQuery(fctx.Query)
+		if err != nil {
+			return err
+		}
+		client, err := storage.FindOAuth2Client(r.Context(), tx, q.Get("client_id"))
+		if err != nil {
+			return err
+		}
+		requested := strings.Fields(q.Get("scope"))
+
+		granted := body.GrantScopes
+		if len(granted) == 0 {
+			if !client.FirstParty {
+				return errConsentRequired
+			}
+			granted = requested
+		} else {
+			allowed := make(map[string]bool, len(requested))
+			for _, s := range requested {
+				allowed[s] = true
+			}
+			for _, s := range granted {
+				if !allowed[s] {
+					return errScopeNotRequested
+				}
+			}
+		}
+
 		identifier, err := storage.IdentifierForIdentity(r.Context(), tx, sess.IdentityID)
 		if err != nil {
 			return err
@@ -207,6 +244,7 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 		fctx.IdentityID = sess.IdentityID
 		fctx.AAL = sess.AAL
 		fctx.Granted = true
+		fctx.GrantedScopes = granted
 		if strings.Contains(identifier, "@") {
 			fctx.Email = identifier
 		}
@@ -221,6 +259,49 @@ func (a *publicAPI) oauthAccept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "session required: log the user in first")
 	case errors.Is(err, errCSRF):
 		writeError(w, http.StatusForbidden, "csrf token missing or invalid (X-CSRF-Token)")
+	case errors.Is(err, storage.ErrFlowNotFound), errors.Is(err, storage.ErrClientNotFound):
+		writeError(w, http.StatusBadRequest, "challenge not found or expired")
+	case errors.Is(err, errConsentRequired):
+		writeError(w, http.StatusBadRequest, "grant_scopes is required: this client's consent cannot be implied")
+	case errors.Is(err, errScopeNotRequested):
+		writeError(w, http.StatusBadRequest, "grant_scopes may only contain scopes the client requested")
+	case err != nil:
+		internalError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"redirect_to": redirectTo})
+	}
+}
+
+// oauthReject records that the user declined; the finish step sends the
+// client a spec-correct access_denied redirect. No session is required —
+// declining must not demand logging in first.
+func (a *publicAPI) oauthReject(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOAuth(w) {
+		return
+	}
+	t := requestTenant(r)
+	challenge := r.URL.Query().Get("challenge")
+	issuer := issuerFromRequest(r)
+
+	var redirectTo string
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		f, err := storage.GetFlow(r.Context(), tx, challenge, flow.KindOAuth2)
+		if err != nil {
+			return err
+		}
+		var fctx flow.OAuth2Context
+		if err := json.Unmarshal(f.Context, &fctx); err != nil {
+			return err
+		}
+		fctx.Rejected = true
+		fctx.Granted = false
+		if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, fctx); err != nil {
+			return err
+		}
+		redirectTo = issuer + "/oauth2/auth/finish?challenge=" + f.ID
+		return nil
+	})
+	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
 		writeError(w, http.StatusBadRequest, "challenge not found or expired")
 	case err != nil:
@@ -250,7 +331,7 @@ func (a *publicAPI) oauthFinish(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(f.Context, &fctx); err != nil {
 			return err
 		}
-		if !fctx.Granted {
+		if !fctx.Granted && !fctx.Rejected {
 			return errChallengeNotAccepted
 		}
 		prov, err := a.providers.For(octx, tx, t.ID, issuer)
@@ -266,7 +347,20 @@ func (a *publicAPI) oauthFinish(w http.ResponseWriter, r *http.Request) {
 			prov.WriteAuthorizeError(octx, w, ar, err)
 			return nil
 		}
-		for _, scope := range ar.GetRequestedScopes() {
+		if fctx.Rejected {
+			if err := storage.DeleteFlow(octx, tx, f.ID); err != nil {
+				return err
+			}
+			prov.WriteAuthorizeError(octx, w, ar, fosite.ErrAccessDenied.WithHint("The user declined the request."))
+			return nil
+		}
+		// Grant exactly the consented scopes (legacy contexts without a
+		// list fall back to everything requested).
+		granted := fctx.GrantedScopes
+		if granted == nil {
+			granted = ar.GetRequestedScopes()
+		}
+		for _, scope := range granted {
 			ar.GrantScope(scope)
 		}
 		sess := oauth2pkg.NewSession(issuer, fctx.IdentityID, ar.GetClient().GetID(), t.ID, fctx.AAL, fctx.Email)
@@ -370,4 +464,8 @@ func (a *publicAPI) oauthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var errChallengeNotAccepted = errors.New("challenge not accepted")
+var (
+	errChallengeNotAccepted = errors.New("challenge not accepted")
+	errConsentRequired      = errors.New("explicit consent required")
+	errScopeNotRequested    = errors.New("granted scope was not requested")
+)

@@ -85,11 +85,14 @@ type RegistrationContext struct {
 }
 
 // OAuth2Context is a Login/Consent Challenge: the parked authorization
-// request, waiting for the tenant's login UI to prove a user and accept.
+// request, waiting for the tenant's login UI to prove a user and accept
+// (with per-scope consent) or reject it.
 type OAuth2Context struct {
-	Query      string `json:"query"` // the original /oauth2/auth query string
-	IdentityID string `json:"identity_id,omitempty"`
-	AAL        string `json:"aal,omitempty"`
-	Email      string `json:"email,omitempty"`
-	Granted    bool   `json:"granted,omitempty"`
+	Query         string   `json:"query"` // the original /oauth2/auth query string
+	IdentityID    string   `json:"identity_id,omitempty"`
+	AAL           string   `json:"aal,omitempty"`
+	Email         string   `json:"email,omitempty"`
+	Granted       bool     `json:"granted,omitempty"`
+	GrantedScopes []string `json:"granted_scopes,omitempty"`
+	Rejected      bool     `json:"rejected,omitempty"`
 }

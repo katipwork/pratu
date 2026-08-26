@@ -63,6 +63,7 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("GET /oauth2/auth", api.oauthAuthorize)
 	tenanted.HandleFunc("GET /oauth2/auth/requests/{challenge}", api.oauthChallengeInfo)
 	tenanted.HandleFunc("POST /oauth2/auth/accept", api.oauthAccept)
+	tenanted.HandleFunc("POST /oauth2/auth/reject", api.oauthReject)
 	tenanted.HandleFunc("GET /oauth2/auth/finish", api.oauthFinish)
 	tenanted.HandleFunc("POST /oauth2/token", api.oauthToken)
 	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
