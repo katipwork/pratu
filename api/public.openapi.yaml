@@ -18,6 +18,9 @@ info:
     (MFA enrolment, logout, session revocation, OAuth2 accept) require the
     session-scope CSRF token in `X-CSRF-Token`, bootstrapped from
     `GET /sessions/whoami`. Header-token requests never need CSRF.
+
+    When `public.reference_ui` is enabled, a reference login UI (static
+    assets, not part of this API contract) is served under `/ui/`.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -483,6 +486,23 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
 
+  /self-service/social:
+    get:
+      tags: [social]
+      summary: List the tenant's social providers (for rendering buttons)
+      responses:
+        "200":
+          description: Providers; never secrets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    label: { type: string }
+                    kind: { type: string, enum: [oidc, github] }
   /self-service/social/{provider}/browser:
     get:
       tags: [social]

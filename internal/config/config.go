@@ -59,6 +59,10 @@ type Public struct {
 	// and X-Forwarded-Proto headers are honored. Empty means forwarded
 	// headers are ignored entirely.
 	TrustedProxies []string `yaml:"trusted_proxies"`
+	// ReferenceUI serves the built-in reference login UI at /ui/ on
+	// tenant hostnames. Off by default: the server is headless, and the
+	// reference UI is a starter/dev convenience.
+	ReferenceUI bool `yaml:"reference_ui"`
 }
 
 type Admin struct {
@@ -109,6 +113,9 @@ func Load(path string) (Config, error) {
 	}
 	if v, ok := os.LookupEnv("PRATU_TRUSTED_PROXIES"); ok {
 		cfg.Public.TrustedProxies = splitList(v)
+	}
+	if v, ok := os.LookupEnv("PRATU_REFERENCE_UI"); ok {
+		cfg.Public.ReferenceUI = v == "true" || v == "1"
 	}
 
 	if cfg.BaseDomain == "" {

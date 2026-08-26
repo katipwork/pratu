@@ -12,6 +12,10 @@ public:
   # X-Forwarded-For / X-Forwarded-Proto headers are honored. Leave empty
   # when clients connect directly. Env: PRATU_TRUSTED_PROXIES (comma-sep).
   # trusted_proxies: ["10.0.0.0/8"]
+  # Serve the built-in reference login UI at /ui/ on tenant hostnames
+  # (login, registration, recovery, MFA, consent). Off by default — the
+  # server is headless; this is a starter/dev convenience.
+  # reference_ui: true
 
 admin:
   listen: ":4434"

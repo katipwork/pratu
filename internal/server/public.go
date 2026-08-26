@@ -29,7 +29,7 @@ func requestTenant(r *http.Request) *tenant.Tenant {
 // NewPublic builds the tenant-facing handler. Health checks are
 // tenant-agnostic; everything else resolves the tenant from the Host
 // header first.
-func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, providers *oauth2.Providers, log *slog.Logger) http.Handler {
+func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, providers *oauth2.Providers, referenceUI bool, log *slog.Logger) http.Handler {
 	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, providers: providers, log: log}
 
 	tenanted := http.NewServeMux()
@@ -68,6 +68,10 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /oauth2/token", api.oauthToken)
 	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
 	tenanted.HandleFunc("POST /oauth2/revoke", api.oauthRevoke)
+	if referenceUI {
+		mountReferenceUI(tenanted)
+	}
+	tenanted.HandleFunc("GET /self-service/social", api.socialList)
 	tenanted.HandleFunc("GET /self-service/social/{provider}/browser", api.socialStart)
 	tenanted.HandleFunc("GET /self-service/social/callback", api.socialCallback)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)

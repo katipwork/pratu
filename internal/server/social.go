@@ -28,6 +28,26 @@ import (
 // Enrolled second factors still apply: social proves only the first
 // factor, so the flow is handed over to a held login flow for TOTP/SMS.
 
+// socialList lets login UIs render provider buttons; ids and labels only.
+func (a *publicAPI) socialList(w http.ResponseWriter, r *http.Request) {
+	t := requestTenant(r)
+	var providers []storage.SocialProvider
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+		var err error
+		providers, err = storage.ListSocialProviders(r.Context(), tx)
+		return err
+	})
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	out := make([]map[string]string, 0, len(providers))
+	for _, p := range providers {
+		out = append(out, map[string]string{"id": p.ID, "label": p.Label, "kind": p.Kind})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func socialRedirectURI(r *http.Request) string {
 	return issuerFromRequest(r) + "/self-service/social/callback"
 }
