@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,13 +14,22 @@ import (
 type Config struct {
 	// BaseDomain is the parent domain for tenant subdomains: tenant "acme"
 	// is served at acme.<BaseDomain> (ADR 0003).
-	BaseDomain string   `yaml:"base_domain"`
-	Public     Public   `yaml:"public"`
-	Admin      Admin    `yaml:"admin"`
-	Database   Database `yaml:"database"`
-	Courier    Courier  `yaml:"courier"`
-	HIBP       HIBP     `yaml:"hibp"`
-	OAuth2     OAuth2   `yaml:"oauth2"`
+	BaseDomain string     `yaml:"base_domain"`
+	Public     Public     `yaml:"public"`
+	Admin      Admin      `yaml:"admin"`
+	Database   Database   `yaml:"database"`
+	Courier    Courier    `yaml:"courier"`
+	HIBP       HIBP       `yaml:"hibp"`
+	OAuth2     OAuth2     `yaml:"oauth2"`
+	Encryption Encryption `yaml:"encryption"`
+}
+
+type Encryption struct {
+	// Keys seal secrets at rest (TOTP secrets, second-factor phones,
+	// tenant signing keys). The first key encrypts; all keys decrypt, so
+	// rotation is prepending a new key. Each must be at least 32
+	// characters. Empty means secrets are stored unencrypted.
+	Keys []string `yaml:"keys"`
 }
 
 type OAuth2 struct {
@@ -90,6 +100,14 @@ func Load(path string) (Config, error) {
 	override(&cfg.Courier.WebhookURL, "PRATU_COURIER_WEBHOOK_URL")
 	override(&cfg.HIBP.BaseURL, "PRATU_HIBP_BASE_URL")
 	override(&cfg.OAuth2.SystemSecret, "PRATU_OAUTH2_SYSTEM_SECRET")
+	if v, ok := os.LookupEnv("PRATU_ENCRYPTION_KEYS"); ok {
+		cfg.Encryption.Keys = nil
+		for _, k := range strings.Split(v, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				cfg.Encryption.Keys = append(cfg.Encryption.Keys, k)
+			}
+		}
+	}
 
 	if cfg.BaseDomain == "" {
 		return Config{}, errors.New("base_domain is required (or set PRATU_BASE_DOMAIN)")

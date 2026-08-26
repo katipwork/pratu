@@ -24,6 +24,13 @@ database:
 #   # (per-tenant setting, on by default, fails open when unreachable).
 #   base_url: https://api.pwnedpasswords.com/range/
 
+encryption:
+  # At-rest encryption for TOTP secrets, second-factor phone numbers, and
+  # tenant signing keys. First key encrypts, all keys decrypt (prepend a
+  # new key to rotate). Each key: 32+ characters. In production set
+  # PRATU_ENCRYPTION_KEYS (comma-separated) instead of this file.
+  keys: []
+
 oauth2:
   # HMAC secret for authorize codes and refresh tokens (min 32 chars).
   # Leave empty to disable the OAuth2/OIDC provider endpoints. Set via

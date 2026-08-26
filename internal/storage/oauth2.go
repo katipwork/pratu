@@ -65,6 +65,18 @@ func ActiveTenantKey(ctx context.Context, tx pgx.Tx, tenantID string) (*TenantKe
 	if err != nil {
 		return nil, err
 	}
+	key, err := parseKeyPEM(pemStr)
+	if err != nil {
+		return nil, err
+	}
+	return &TenantKey{KID: kid, Key: key}, nil
+}
+
+func parseKeyPEM(stored string) (*rsa.PrivateKey, error) {
+	pemStr, err := cipher.Decrypt(stored)
+	if err != nil {
+		return nil, fmt.Errorf("tenant key: %w", err)
+	}
 	block, _ := pem.Decode([]byte(pemStr))
 	if block == nil {
 		return nil, errors.New("tenant key: invalid PEM")
@@ -73,7 +85,7 @@ func ActiveTenantKey(ctx context.Context, tx pgx.Tx, tenantID string) (*TenantKe
 	if err != nil {
 		return nil, fmt.Errorf("tenant key: %w", err)
 	}
-	return &TenantKey{KID: kid, Key: key}, nil
+	return key, nil
 }
 
 // VerificationKeys returns every key (active and retired) for the JWKS.
@@ -89,11 +101,7 @@ func VerificationKeys(ctx context.Context, tx pgx.Tx) ([]TenantKey, error) {
 		if err := rows.Scan(&kid, &pemStr); err != nil {
 			return nil, err
 		}
-		block, _ := pem.Decode([]byte(pemStr))
-		if block == nil {
-			return nil, errors.New("tenant key: invalid PEM")
-		}
-		key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		key, err := parseKeyPEM(pemStr)
 		if err != nil {
 			return nil, err
 		}
@@ -170,11 +178,15 @@ func generateTenantKey(ctx context.Context, tx pgx.Tx, tenantID string) (*Tenant
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	}))
+	stored, err := cipher.Encrypt(pemStr)
+	if err != nil {
+		return nil, err
+	}
 	var kid string
 	err = tx.QueryRow(ctx,
 		`INSERT INTO tenant_keys (tenant_id, kid, private_pem)
 		 VALUES ($1, gen_random_uuid()::text, $2) RETURNING kid`,
-		tenantID, pemStr,
+		tenantID, stored,
 	).Scan(&kid)
 	if err != nil {
 		return nil, err

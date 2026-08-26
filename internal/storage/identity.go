@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/secrets"
 )
 
 // ErrIdentifierTaken reports a registration whose identifier already
@@ -93,8 +94,16 @@ func CreateIdentity(ctx context.Context, tx pgx.Tx, tenantID, schemaID string, t
 	return &ident, nil
 }
 
+// encryptedCredentialKinds are stored sealed: their configs contain
+// impersonation-grade secrets (TOTP secret, second-factor phone).
+var encryptedCredentialKinds = map[string]bool{
+	identity.CredentialTOTP: true,
+	identity.CredentialSMS:  true,
+}
+
 // CredentialConfig loads one credential's config for an identity, or nil
-// when the identity has no credential of that kind.
+// when the identity has no credential of that kind. Encrypted configs
+// (stored as a JSON string "enc:v1:...") are opened transparently.
 func CredentialConfig(ctx context.Context, tx pgx.Tx, identityID, kind string) (json.RawMessage, error) {
 	var config json.RawMessage
 	err := tx.QueryRow(ctx,
@@ -104,14 +113,40 @@ func CredentialConfig(ctx context.Context, tx pgx.Tx, identityID, kind string) (
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	return config, err
+	if err != nil {
+		return nil, err
+	}
+	if len(config) > 0 && config[0] == '"' {
+		var sealed string
+		if err := json.Unmarshal(config, &sealed); err != nil {
+			return nil, err
+		}
+		plain, err := cipher.Decrypt(sealed)
+		if err != nil {
+			return nil, fmt.Errorf("credential %s: %w", kind, err)
+		}
+		return json.RawMessage(plain), nil
+	}
+	return config, nil
 }
 
-// SetCredential creates or replaces a credential of one kind.
+// SetCredential creates or replaces a credential of one kind, sealing the
+// config for second-factor kinds.
 func SetCredential(ctx context.Context, tx pgx.Tx, tenantID, identityID, kind string, config any) error {
 	raw, err := json.Marshal(config)
 	if err != nil {
 		return err
+	}
+	if encryptedCredentialKinds[kind] {
+		sealed, err := cipher.Encrypt(string(raw))
+		if err != nil {
+			return err
+		}
+		if secrets.Encrypted(sealed) {
+			if raw, err = json.Marshal(sealed); err != nil {
+				return err
+			}
+		}
 	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO identity_credentials (tenant_id, identity_id, kind, config) VALUES ($1, $2, $3, $4)

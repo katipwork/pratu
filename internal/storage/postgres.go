@@ -14,8 +14,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/katipwork/pratu/internal/secrets"
 	"github.com/katipwork/pratu/internal/tenant"
 )
+
+// cipher guards secrets at rest (TOTP secrets, second-factor phones,
+// tenant signing keys). nil means encryption is not configured and values
+// are stored plaintext; set once at startup.
+var cipher *secrets.Cipher
+
+func SetCipher(c *secrets.Cipher) {
+	cipher = c
+}
 
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, url)

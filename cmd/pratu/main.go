@@ -19,6 +19,7 @@ import (
 	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/ratelimit"
+	"github.com/katipwork/pratu/internal/secrets"
 	"github.com/katipwork/pratu/internal/server"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -86,6 +87,19 @@ func serve(log *slog.Logger, args []string) error {
 		return fmt.Errorf("connect to database: %w", err)
 	}
 	defer pool.Close()
+
+	cip, err := secrets.NewCipher(cfg.Encryption.Keys)
+	if err != nil {
+		return err
+	}
+	storage.SetCipher(cip)
+	if cip == nil {
+		log.Warn("encryption.keys not set; TOTP secrets, factor phones, and signing keys are stored unencrypted")
+	} else if keys, creds, err := storage.EncryptAtRest(ctx, pool); err != nil {
+		return fmt.Errorf("encrypt-at-rest sweep: %w", err)
+	} else if keys+creds > 0 {
+		log.Info("encrypted legacy plaintext secrets", "tenant_keys", keys, "credentials", creds)
+	}
 
 	resolver := tenant.NewResolver(cfg.BaseDomain, storage.NewTenantStore(pool))
 
