@@ -111,7 +111,7 @@ func serve(log *slog.Logger, args []string) error {
 	}
 
 	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, providers, log)}
-	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey)}
+	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey, providers)}
 
 	errc := make(chan error, 2)
 	go func() {

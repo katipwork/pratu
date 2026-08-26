@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
 	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
@@ -19,8 +20,8 @@ import (
 // NewAdmin builds the platform admin handler. It runs on its own listener
 // and is never routed through tenant hostnames. Health checks are open;
 // everything under /admin/ requires the root API key.
-func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
-	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool)}
+func NewAdmin(pool *pgxpool.Pool, rootKey string, providers *oauth2.Providers) http.Handler {
+	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool), providers: providers}
 
 	api := http.NewServeMux()
 	api.HandleFunc("POST /admin/tenants", admin.createTenant)
@@ -31,6 +32,9 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
 	api.HandleFunc("DELETE /admin/tenants/{slug}/clients/{id}", admin.deleteClient)
 	api.HandleFunc("GET /admin/tenants/{slug}/identities/{id}/sessions", admin.listIdentitySessions)
 	api.HandleFunc("DELETE /admin/tenants/{slug}/identities/{id}/sessions", admin.revokeIdentitySessions)
+	api.HandleFunc("POST /admin/tenants/{slug}/keys/rotate", admin.rotateKey)
+	api.HandleFunc("GET /admin/tenants/{slug}/keys", admin.listKeys)
+	api.HandleFunc("DELETE /admin/tenants/{slug}/keys/{kid}", admin.deleteKey)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
@@ -56,8 +60,9 @@ func requireRootKey(rootKey string, next http.Handler) http.Handler {
 }
 
 type adminAPI struct {
-	pool    *pgxpool.Pool
-	tenants *storage.TenantStore
+	pool      *pgxpool.Pool
+	tenants   *storage.TenantStore
+	providers *oauth2.Providers // nil when OAuth2 is disabled
 }
 
 // slugPattern mirrors the CHECK constraint on tenants.slug; slugs become

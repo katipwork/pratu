@@ -2,6 +2,7 @@ package oauth2
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +91,18 @@ func (p *Providers) For(ctx context.Context, tx pgx.Tx, tenantID, issuer string)
 	p.cache[cacheKey] = prov
 	p.mu.Unlock()
 	return prov, nil
+}
+
+// Invalidate drops a tenant's cached providers so the next request
+// rebuilds them against the current active key (called after rotation).
+func (p *Providers) Invalidate(tenantID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key := range p.cache {
+		if strings.HasPrefix(key, tenantID+"|") {
+			delete(p.cache, key)
+		}
+	}
 }
 
 // JWKS renders every tenant key (active and retired) as a public key set.

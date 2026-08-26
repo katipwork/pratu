@@ -102,6 +102,65 @@ func VerificationKeys(ctx context.Context, tx pgx.Tx) ([]TenantKey, error) {
 	return out, rows.Err()
 }
 
+// RotateTenantKey retires the current active key (it stays verifiable in
+// the JWKS) and mints a fresh active one.
+func RotateTenantKey(ctx context.Context, tx pgx.Tx, tenantID string) (*TenantKey, error) {
+	if _, err := tx.Exec(ctx, `UPDATE tenant_keys SET active = false WHERE active`); err != nil {
+		return nil, err
+	}
+	return generateTenantKey(ctx, tx, tenantID)
+}
+
+// TenantKeyInfo is the public shape of a signing key: no private material.
+type TenantKeyInfo struct {
+	KID       string    `json:"kid"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListTenantKeys describes the tenant's keys, newest first.
+func ListTenantKeys(ctx context.Context, tx pgx.Tx) ([]TenantKeyInfo, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT kid, active, created_at FROM tenant_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TenantKeyInfo
+	for rows.Next() {
+		var k TenantKeyInfo
+		if err := rows.Scan(&k.KID, &k.Active, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+var (
+	ErrKeyNotFound = errors.New("key not found")
+	ErrKeyActive   = errors.New("key is active")
+)
+
+// DeleteTenantKey drops a retired key: tokens signed with it stop
+// verifying, so this is the deliberate end of the rotation lifecycle.
+// The active key is refused.
+func DeleteTenantKey(ctx context.Context, tx pgx.Tx, kid string) error {
+	var active bool
+	err := tx.QueryRow(ctx, `SELECT active FROM tenant_keys WHERE kid = $1`, kid).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrKeyNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if active {
+		return ErrKeyActive
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM tenant_keys WHERE kid = $1`, kid)
+	return err
+}
+
 func generateTenantKey(ctx context.Context, tx pgx.Tx, tenantID string) (*TenantKey, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
