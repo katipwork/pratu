@@ -26,6 +26,8 @@ type Session struct {
 	ID              string    `json:"id"`
 	IdentityID      string    `json:"identity_id"`
 	AAL             string    `json:"aal"`
+	IP              string    `json:"ip,omitempty"`
+	UserAgent       string    `json:"user_agent,omitempty"`
 	AuthenticatedAt time.Time `json:"authenticated_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
 }

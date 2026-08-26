@@ -325,7 +325,7 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
 			return err
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, fctx.IdentityID, session.AAL2)
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, fctx.IdentityID, session.AAL2, deviceFrom(r))
 		return err
 	})
 	switch {

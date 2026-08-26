@@ -29,6 +29,8 @@ func NewAdmin(pool *pgxpool.Pool, rootKey string) http.Handler {
 	api.HandleFunc("POST /admin/tenants/{slug}/clients", admin.createClient)
 	api.HandleFunc("GET /admin/tenants/{slug}/clients", admin.listClients)
 	api.HandleFunc("DELETE /admin/tenants/{slug}/clients/{id}", admin.deleteClient)
+	api.HandleFunc("GET /admin/tenants/{slug}/identities/{id}/sessions", admin.listIdentitySessions)
+	api.HandleFunc("DELETE /admin/tenants/{slug}/identities/{id}/sessions", admin.revokeIdentitySessions)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)

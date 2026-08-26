@@ -193,7 +193,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !holdSession {
-			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, session.AAL1)
+			sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, session.AAL1, deviceFrom(r))
 		}
 		return err
 	})
@@ -329,7 +329,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
 			return err
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID, session.AAL1)
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID, session.AAL1, deviceFrom(r))
 		return err
 	})
 	if err != nil {

@@ -68,6 +68,9 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /oauth2/introspect", api.oauthIntrospect)
 	tenanted.HandleFunc("POST /oauth2/revoke", api.oauthRevoke)
 	tenanted.HandleFunc("GET /sessions/whoami", api.whoami)
+	tenanted.HandleFunc("GET /sessions", api.listSessions)
+	tenanted.HandleFunc("DELETE /sessions", api.revokeOtherSessions)
+	tenanted.HandleFunc("DELETE /sessions/{id}", api.revokeSession)
 	tenanted.HandleFunc("POST /self-service/logout", api.logout)
 
 	mux := http.NewServeMux()

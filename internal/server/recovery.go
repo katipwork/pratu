@@ -279,7 +279,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return err
 		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, aal)
+		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, ident.ID, aal, deviceFrom(r))
 		return err
 	})
 	switch {

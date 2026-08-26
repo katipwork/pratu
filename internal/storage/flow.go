@@ -18,6 +18,12 @@ var ErrFlowNotFound = errors.New("flow not found or expired")
 // otherwise surface as a database error instead of a clean not-found.
 var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// ValidUUID reports whether a client-supplied id is uuid-shaped, so
+// handlers can 404 instead of surfacing a database cast error.
+func ValidUUID(s string) bool {
+	return uuidPattern.MatchString(s)
+}
+
 // CreateFlow starts a new self-service flow for the current tenant.
 // flowContext carries server-side state (nil for flows that need none);
 // browser flows carry CSRF protection.

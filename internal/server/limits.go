@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/katipwork/pratu/internal/identity"
+	"github.com/katipwork/pratu/internal/storage"
 	"github.com/katipwork/pratu/internal/tenant"
 )
 
@@ -97,6 +98,11 @@ func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}
 	writeError(w, http.StatusTooManyRequests, "too many requests; try again later")
+}
+
+// deviceFrom captures session device metadata from the request.
+func deviceFrom(r *http.Request) storage.Device {
+	return storage.Device{IP: clientIP(r), UserAgent: r.UserAgent()}
 }
 
 // clientIP keys the per-IP limits. RemoteAddr only for now: forwarded
