@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -103,14 +102,4 @@ func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
 // deviceFrom captures session device metadata from the request.
 func deviceFrom(r *http.Request) storage.Device {
 	return storage.Device{IP: clientIP(r), UserAgent: r.UserAgent()}
-}
-
-// clientIP keys the per-IP limits. RemoteAddr only for now: forwarded
-// headers are trustworthy only behind a proxy we control, which needs its
-// own config before it is safe to honor.
-func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }

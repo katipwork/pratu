@@ -8,6 +8,10 @@ base_domain: pratu.localhost
 
 public:
   listen: ":4433"
+  # CIDR ranges (or bare IPs) of load balancers/reverse proxies whose
+  # X-Forwarded-For / X-Forwarded-Proto headers are honored. Leave empty
+  # when clients connect directly. Env: PRATU_TRUSTED_PROXIES (comma-sep).
+  # trusted_proxies: ["10.0.0.0/8"]
 
 admin:
   listen: ":4434"

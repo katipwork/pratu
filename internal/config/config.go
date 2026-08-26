@@ -55,6 +55,10 @@ type Courier struct {
 
 type Public struct {
 	Listen string `yaml:"listen"`
+	// TrustedProxies are CIDR ranges (or bare IPs) whose X-Forwarded-For
+	// and X-Forwarded-Proto headers are honored. Empty means forwarded
+	// headers are ignored entirely.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type Admin struct {
@@ -101,12 +105,10 @@ func Load(path string) (Config, error) {
 	override(&cfg.HIBP.BaseURL, "PRATU_HIBP_BASE_URL")
 	override(&cfg.OAuth2.SystemSecret, "PRATU_OAUTH2_SYSTEM_SECRET")
 	if v, ok := os.LookupEnv("PRATU_ENCRYPTION_KEYS"); ok {
-		cfg.Encryption.Keys = nil
-		for _, k := range strings.Split(v, ",") {
-			if k = strings.TrimSpace(k); k != "" {
-				cfg.Encryption.Keys = append(cfg.Encryption.Keys, k)
-			}
-		}
+		cfg.Encryption.Keys = splitList(v)
+	}
+	if v, ok := os.LookupEnv("PRATU_TRUSTED_PROXIES"); ok {
+		cfg.Public.TrustedProxies = splitList(v)
 	}
 
 	if cfg.BaseDomain == "" {
@@ -134,4 +136,14 @@ func override(dst *string, env string) {
 	if v, ok := os.LookupEnv(env); ok {
 		*dst = v
 	}
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

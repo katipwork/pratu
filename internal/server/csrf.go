@@ -28,7 +28,7 @@ const (
 var errCSRF = errors.New("csrf token missing or invalid")
 
 func secureRequest(r *http.Request) bool {
-	return r.TLS != nil
+	return requestSecure(r)
 }
 
 // ensureCSRFCookie returns the browser's CSRF secret, minting the cookie

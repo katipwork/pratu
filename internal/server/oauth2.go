@@ -33,7 +33,7 @@ func (a *publicAPI) requireOAuth(w http.ResponseWriter) bool {
 
 func issuerFromRequest(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if requestSecure(r) {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host

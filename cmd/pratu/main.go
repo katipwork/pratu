@@ -101,6 +101,15 @@ func serve(log *slog.Logger, args []string) error {
 		log.Info("encrypted legacy plaintext secrets", "tenant_keys", keys, "credentials", creds)
 	}
 
+	proxies, err := server.ParseProxies(cfg.Public.TrustedProxies)
+	if err != nil {
+		return err
+	}
+	server.SetTrustedProxies(proxies)
+	if len(proxies) > 0 {
+		log.Info("honoring forwarded headers from trusted proxies", "ranges", cfg.Public.TrustedProxies)
+	}
+
 	resolver := tenant.NewResolver(cfg.BaseDomain, storage.NewTenantStore(pool))
 
 	var driver courier.Driver
