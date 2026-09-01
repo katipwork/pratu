@@ -1,10 +1,20 @@
-.PHONY: build test vet fmt run migrate db-up db-down
+.PHONY: build test test-integration vet fmt run migrate db-up db-down
+
+# The database the integration tests run against. Override when port 5432
+# is taken: make test-integration PRATU_TEST_DATABASE_URL=...
+PRATU_TEST_DATABASE_URL ?= postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable
 
 build:
 	go build -o bin/pratu ./cmd/pratu
 
+# Unit tests only: the database-backed tests skip themselves.
 test:
 	go test ./...
+
+# Everything, including the tests that drive the real handlers against a
+# real Postgres. The suite migrates the database itself.
+test-integration: db-up
+	PRATU_TEST_DATABASE_URL="$(PRATU_TEST_DATABASE_URL)" go test ./...
 
 vet:
 	go vet ./...

@@ -48,6 +48,22 @@ Tenant hostnames work locally without DNS setup: browsers and curl resolve `*.lo
 
 For production set, at minimum: `PRATU_ADMIN_ROOT_KEY`, `PRATU_OAUTH2_SYSTEM_SECRET` (enables the OAuth2 provider), `PRATU_ENCRYPTION_KEYS` (seals secrets at rest), and `public.trusted_proxies` if behind a load balancer.
 
+## Tests
+
+```sh
+make test              # unit tests; the database-backed ones skip themselves
+make test-integration  # everything, against a real Postgres (it migrates itself)
+```
+
+The integration tests drive the real handlers over a real database — flows,
+RLS, CSRF cookies, redirects. They run when `PRATU_TEST_DATABASE_URL` points
+at a database whose role is unprivileged (no superuser, no `BYPASSRLS`), and
+skip when it is unset. Override the URL when port 5432 is taken:
+
+```sh
+make test-integration PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5433/pratu?sslmode=disable
+```
+
 ## License
 
 [Apache-2.0](LICENSE)

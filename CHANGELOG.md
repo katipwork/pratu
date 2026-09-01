@@ -28,6 +28,15 @@
 - Tenants that configure no screens fall back to the embedded reference
   UI when the server serves it; the reference UI renders `?flow=` and
   `?code=` landings.
+- Integration tests for the Browser Flow contract: the real handlers over
+  a real Postgres (negotiation, form-post journeys, error persistence
+  across rollback, flow-read binding, open redirects, fatal codes, rate
+  limiting, verification/MFA/recovery journeys, legacy config, reference
+  UI fallback). `make test-integration` runs them; CI now provisions
+  Postgres, so the previously-skipped janitor and rate-limit tests run
+  there too.
+- `storage.Migrate` takes an advisory lock, so replicas (or test suites)
+  starting together no longer race to apply the same migration.
 
 
 ## v0.2.0 — 2026-08-26

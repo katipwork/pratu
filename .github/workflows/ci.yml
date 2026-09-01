@@ -17,15 +17,40 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # The database-backed tests must connect as an unprivileged role:
+      # RLS (ADR 0004) is silently inert under superuser or BYPASSRLS, so
+      # the server refuses such a role outright.
+      - name: Create the application role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -f scripts/devdb/01-app-role.sql
+
       - run: go build ./...
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)"
       - run: go test ./...
+        env:
+          PRATU_TEST_DATABASE_URL: postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable
 
   docker:
     needs: test

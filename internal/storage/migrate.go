@@ -13,11 +13,32 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// migrationLock namespaces the advisory lock Migrate holds while it
+// works: replicas (and test binaries) start together and would otherwise
+// race to apply the same file, where the loser fails on a half-applied
+// schema.
+const migrationLock int64 = 0x70726174 // "prat"
+
 // Migrate applies embedded migrations that have not yet run, in filename
 // order, each in its own transaction. It returns the versions applied by
-// this call.
+// this call. Concurrent callers serialize: the second one waits, then
+// finds nothing left to do.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
-	_, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	lock, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer lock.Release()
+	if _, err := lock.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLock); err != nil {
+		return nil, fmt.Errorf("take migration lock: %w", err)
+	}
+	defer func() {
+		// Released explicitly: the lock lives on the session, which the
+		// pool hands to somebody else next.
+		_, _ = lock.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, migrationLock)
+	}()
+
+	_, err = pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    text PRIMARY KEY,
 		applied_at timestamptz NOT NULL DEFAULT now()
 	)`)

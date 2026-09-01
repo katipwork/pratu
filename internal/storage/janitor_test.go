@@ -13,7 +13,27 @@ import (
 	"github.com/katipwork/pratu/internal/flow"
 )
 
-// Integration test; runs only against a migrated database:
+// TestMain migrates the test database, so a fresh one works with no
+// setup beyond an unprivileged role. Migrate serializes on an advisory
+// lock, so the other packages' suites may do the same concurrently.
+func TestMain(m *testing.M) {
+	if url := os.Getenv("PRATU_TEST_DATABASE_URL"); url != "" {
+		ctx := context.Background()
+		pool, err := pgxpool.New(ctx, url)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "integration tests: connect: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := Migrate(ctx, pool); err != nil {
+			fmt.Fprintf(os.Stderr, "integration tests: migrate: %v\n", err)
+			os.Exit(1)
+		}
+		pool.Close()
+	}
+	os.Exit(m.Run())
+}
+
+// Integration test; runs only against a database (TestMain migrates it):
 //
 //	PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable go test ./internal/storage/
 func TestCleanupExpired(t *testing.T) {
