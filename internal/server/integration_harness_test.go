@@ -30,7 +30,7 @@ import (
 // flow rows, real CSRF cookies — and are skipped unless a database is
 // pointed at:
 //
-//	PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable go test ./internal/server/
+//	PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable go test ./internal/server/
 //
 // The role must be unprivileged (no superuser, no BYPASSRLS) or
 // storage.Connect refuses it: RLS is silently inert under an elevated

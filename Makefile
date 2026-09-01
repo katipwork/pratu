@@ -1,7 +1,9 @@
 .PHONY: build test test-integration vet fmt run migrate db-up db-down
 
-# The database the integration tests run against. Override when port 5432
-# is taken: make test-integration PRATU_TEST_DATABASE_URL=...
+# The database the integration tests run against: the compose one, which
+# publishes on 35432 to stay clear of any Postgres already on 5432.
+# Override to point somewhere else:
+#   make test-integration PRATU_TEST_DATABASE_URL=...
 PRATU_TEST_DATABASE_URL ?= postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable
 
 build:

@@ -5,7 +5,9 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Published clear of 5432: a developer machine often already runs a
+      # Postgres there.
+      - "35432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/devdb:/docker-entrypoint-initdb.d:ro

@@ -58,10 +58,11 @@ make test-integration  # everything, against a real Postgres (it migrates itself
 The integration tests drive the real handlers over a real database — flows,
 RLS, CSRF cookies, redirects. They run when `PRATU_TEST_DATABASE_URL` points
 at a database whose role is unprivileged (no superuser, no `BYPASSRLS`), and
-skip when it is unset. Override the URL when port 5432 is taken:
+skip when it is unset. It defaults to the compose database (published on
+35432, clear of any Postgres already on 5432); point it elsewhere with:
 
 ```sh
-make test-integration PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5433/pratu?sslmode=disable
+make test-integration PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable
 ```
 
 ## License

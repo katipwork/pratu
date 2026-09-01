@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 
 // Integration test; runs only against a database (TestMain migrates it):
 //
-//	PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable go test ./internal/ratelimit/
+//	PRATU_TEST_DATABASE_URL=postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable go test ./internal/ratelimit/
 func TestAllow(t *testing.T) {
 	url := os.Getenv("PRATU_TEST_DATABASE_URL")
 	if url == "" {

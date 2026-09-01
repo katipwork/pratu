@@ -57,8 +57,8 @@ end through real handlers, real CSRF cookies, real RLS, and a real flow row.
    (migrations are idempotent), so one command works against an empty
    database.
 10. **Make target**: `test-integration` = `db-up` + `go test` with
-    `PRATU_TEST_DATABASE_URL` defaulting to the compose database
-    (overridable — local machines may have port 5432 occupied).
+    `PRATU_TEST_DATABASE_URL` defaulting to the compose database, which
+    publishes on 35432 to stay clear of a Postgres already on 5432.
 
 ## Wiring map (verified)
 

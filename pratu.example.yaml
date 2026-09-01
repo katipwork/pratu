@@ -25,7 +25,7 @@ admin:
   root_key: ""
 
 database:
-  url: postgres://pratu:pratu@localhost:5432/pratu?sslmode=disable
+  url: postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable
 
 # hibp:
 #   # Pwned-Passwords-compatible range API for the password breach check
