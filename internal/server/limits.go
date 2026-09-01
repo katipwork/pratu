@@ -48,10 +48,19 @@ func (errRateLimited) Error() string { return "rate limited" }
 func (a *publicAPI) allow(w http.ResponseWriter, r *http.Request, key string, limit int, window time.Duration) bool {
 	ok, retryAfter, err := a.limiter.Allow(r.Context(), key, limit, window)
 	if err != nil {
+		if a.redirectToError(w, r, requestTenant(r), errCodeInternal) {
+			logError(err)
+			return false
+		}
 		internalError(w, err)
 		return false
 	}
 	if !ok {
+		// A blocked request has no flow to go back to; the error screen
+		// says so in the tenant's own UI.
+		if a.redirectToError(w, r, requestTenant(r), errCodeRateLimited) {
+			return false
+		}
 		writeRateLimited(w, retryAfter)
 		return false
 	}

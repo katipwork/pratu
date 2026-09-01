@@ -28,7 +28,10 @@ type publicAPI struct {
 	breach    password.BreachChecker
 	limiter   *ratelimit.Limiter
 	providers *oauth2.Providers // nil disables the OAuth2 endpoints
-	log       *slog.Logger
+	// referenceUI reports whether the built-in screens are served, so a
+	// tenant that configured none still has somewhere to redirect to.
+	referenceUI bool
+	log         *slog.Logger
 }
 
 // dummyHash keeps login timing uniform when the identifier is unknown.
@@ -48,6 +51,9 @@ type flowResponse struct {
 	CSRFToken string `json:"csrf_token,omitempty"`
 	UI        struct {
 		Fields []identity.Field `json:"fields"`
+		// Methods lists the second factors a flow can be continued
+		// with, when it waits on one.
+		Methods []string `json:"methods,omitempty"`
 	} `json:"ui"`
 }
 
@@ -64,6 +70,13 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 				internalError(w, err)
 				return
 			}
+		}
+		// A browser flow may name where to land when it completes; an
+		// unvalidated target would make this an open redirect.
+		returnTo, ok := validateReturnTo(t, r, r.URL.Query().Get("return_to"))
+		if !ok {
+			writeError(w, http.StatusBadRequest, "return_to is not an allowed URL for this tenant")
+			return
 		}
 		var resp flowResponse
 		err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
@@ -95,7 +108,12 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 					{Name: "password", Type: "password", Title: "Password", Required: true},
 				}
 			}
-			f, err := storage.CreateFlow(r.Context(), tx, t.ID, kind, flowContext, browser)
+			f, err := storage.CreateFlowWith(r.Context(), tx, t.ID, kind, flowContext, browser,
+				storage.FlowOptions{
+					ReturnTo:        returnTo,
+					CSRFFingerprint: csrfFingerprint(csrfSec),
+					State:           flow.StateChooseMethod,
+				})
 			if err != nil {
 				return err
 			}
@@ -106,11 +124,23 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 			return nil
 		})
 		if errors.Is(err, storage.ErrSchemaNotFound) {
+			if a.redirectToError(w, r, t, errCodeUnknownSchema) {
+				return
+			}
 			writeError(w, http.StatusBadRequest, "unknown identity schema")
 			return
 		}
 		if err != nil {
+			if a.redirectToError(w, r, t, errCodeInternal) {
+				logError(err)
+				return
+			}
 			internalError(w, err)
+			return
+		}
+		// An HTML client asked for a screen, not a flow object: send it to
+		// the tenant's screen with the flow to render.
+		if browser && a.redirectToScreen(w, r, t, kind, resp.Flow.ID) {
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -130,14 +160,15 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		Password  string          `json:"password"`
 		CSRFToken string          `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 	if body.Method != "password" {
-		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
+		a.failSubmission(w, r, t, flow.KindRegistration, flowID,
+			http.StatusBadRequest, "unsupported method; use \"password\"")
 		return
 	}
-	if !a.validatePassword(w, r, t, body.Password) {
+	if !a.validatePassword(w, r, t, flow.KindRegistration, flowID, body.Password) {
 		return
 	}
 
@@ -154,6 +185,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		verif       *verificationInfo
 		holdSession bool
 		browser     bool
+		returnTo    string
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRegistration)
@@ -161,6 +193,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -225,15 +258,21 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		var rl errRateLimited
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
-			writeError(w, http.StatusBadRequest, "registration flow not found or expired")
+			a.failFatal(w, r, t, errCodeFlowExpired,
+				http.StatusBadRequest, "registration flow not found or expired")
 		case errors.Is(err, errCSRF):
-			writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+			a.failFatal(w, r, t, errCodeCSRF,
+				http.StatusForbidden, "invalid or missing csrf_token")
 		case errors.As(err, &ve):
-			writeError(w, http.StatusBadRequest, "invalid traits", ve.msgs...)
+			a.failSubmission(w, r, t, flow.KindRegistration, flowID,
+				http.StatusBadRequest, "invalid traits", ve.msgs...)
 		case errors.Is(err, storage.ErrIdentifierTaken):
-			writeError(w, http.StatusConflict, "an account with this identifier already exists")
+			a.failSubmission(w, r, t, flow.KindRegistration, flowID,
+				http.StatusConflict, "an account with this identifier already exists")
 		case errors.As(err, &rl):
-			writeRateLimited(w, rl.retryAfter)
+			if !a.redirectToError(w, r, t, errCodeRateLimited) {
+				writeRateLimited(w, rl.retryAfter)
+			}
 		default:
 			internalError(w, err)
 		}
@@ -246,11 +285,19 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	}
 	if holdSession {
 		resp["state"] = "verification_required"
+		// The verification flow is the browser's next screen; it carries
+		// its own id, so the UI lands ready to take the One-Time Code.
+		if browser && a.redirectToScreen(w, r, t, flow.KindVerification, verif.FlowID) {
+			return
+		}
 	} else {
 		resp["state"] = "active"
 		resp["session"] = sess
 		if browser {
 			setSessionCookie(w, r, token, sess.ExpiresAt)
+			if a.redirectAfterSuccess(w, r, t, returnTo) {
+				return
+			}
 		} else {
 			resp["session_token"] = token
 		}
@@ -268,11 +315,12 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		Password   string `json:"password"`
 		CSRFToken  string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 	if body.Method != "password" {
-		writeError(w, http.StatusBadRequest, "unsupported method; use \"password\"")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID,
+			http.StatusBadRequest, "unsupported method; use \"password\"")
 		return
 	}
 	if !a.allow(w, r, "login:ip:"+clientIP(r), limitLoginPerIP, time.Minute) {
@@ -290,12 +338,14 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	)
 	var mfaRequired, enrollNeeded, browser bool
 	var mfaMethods []string
+	var returnTo string
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -341,10 +391,15 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 			if len(methods) > 0 {
 				mfaRequired = true
 				mfaMethods = methods
-				return storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
+				if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
 					IdentityID: identityID,
 					PasswordOK: true,
-				})
+				}); err != nil {
+					return err
+				}
+				// The flow stays open on its second-factor step, so a
+				// redirected browser knows which screen to render.
+				return storage.SetFlowUI(r.Context(), tx, f.ID, flow.StateMFARequired, nil)
 			}
 			enrollNeeded = t.Config.EffectiveMFA() == tenant.MFARequired
 		}
@@ -359,19 +414,27 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		var rl errRateLimited
 		switch {
 		case errors.Is(err, storage.ErrFlowNotFound):
-			writeError(w, http.StatusBadRequest, "login flow not found or expired")
+			a.failFatal(w, r, t, errCodeFlowExpired,
+				http.StatusBadRequest, "login flow not found or expired")
 		case errors.Is(err, errCSRF):
-			writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+			a.failFatal(w, r, t, errCodeCSRF,
+				http.StatusForbidden, "invalid or missing csrf_token")
 		case errors.Is(err, errInvalidCredentials):
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			a.failSubmission(w, r, t, flow.KindLogin, flowID,
+				http.StatusUnauthorized, "invalid credentials")
 		case errors.As(err, &rl):
-			writeRateLimited(w, rl.retryAfter)
+			if !a.redirectToError(w, r, t, errCodeRateLimited) {
+				writeRateLimited(w, rl.retryAfter)
+			}
 		default:
 			internalError(w, err)
 		}
 		return
 	}
 	if verif != nil {
+		if browser && a.redirectToScreen(w, r, t, flow.KindVerification, verif.FlowID) {
+			return
+		}
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"state":        "verification_required",
 			"verification": verif,
@@ -379,6 +442,11 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mfaRequired {
+		// The second factor is owed on this same login flow: back to the
+		// login screen, which reads the flow's state to render the step.
+		if browser && a.redirectToScreen(w, r, t, flow.KindLogin, flowID) {
+			return
+		}
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"state":   "mfa_required",
 			"methods": mfaMethods,
@@ -393,6 +461,11 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"state": state, "session": sess}
 	if browser {
 		setSessionCookie(w, r, token, sess.ExpiresAt)
+		// Enrolment is owed but the session is real; the UI decides what
+		// to do with it, so only a plain success redirects.
+		if !enrollNeeded && a.redirectAfterSuccess(w, r, t, returnTo) {
+			return
+		}
 	} else {
 		resp["session_token"] = token
 	}
@@ -400,9 +473,11 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // validatePassword enforces the tenant's password policy, answering the
-// request itself on rejection. It runs before any transaction opens: the
-// breach check is a network call and must not hold a transaction hostage.
-func (a *publicAPI) validatePassword(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, candidate string) bool {
+// request itself on rejection (back to the flow's screen for a browser).
+// It runs before any transaction opens: the breach check is a network
+// call and must not hold a transaction hostage.
+func (a *publicAPI) validatePassword(w http.ResponseWriter, r *http.Request, t *tenant.Tenant,
+	kind flow.Kind, flowID, candidate string) bool {
 	pol := password.Policy{
 		MinLength:   t.Config.Password.MinLength,
 		BreachCheck: t.Config.Password.BreachCheckEnabled(),
@@ -412,7 +487,7 @@ func (a *publicAPI) validatePassword(w http.ResponseWriter, r *http.Request, t *
 		a.log.Warn("breach check unavailable; allowing password through (fail-open)", "error", checkErr)
 	}
 	if violations != nil {
-		writeError(w, http.StatusBadRequest, "password rejected", violations...)
+		a.failSubmission(w, r, t, kind, flowID, http.StatusBadRequest, "password rejected", violations...)
 		return false
 	}
 	return true

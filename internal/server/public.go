@@ -30,11 +30,15 @@ func requestTenant(r *http.Request) *tenant.Tenant {
 // tenant-agnostic; everything else resolves the tenant from the Host
 // header first.
 func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.BreachChecker, limiter *ratelimit.Limiter, providers *oauth2.Providers, referenceUI bool, log *slog.Logger) http.Handler {
-	api := &publicAPI{pool: pool, breach: breach, limiter: limiter, providers: providers, log: log}
+	api := &publicAPI{
+		pool: pool, breach: breach, limiter: limiter, providers: providers,
+		referenceUI: referenceUI, log: log,
+	}
 
 	tenanted := http.NewServeMux()
 	tenanted.HandleFunc("POST /self-service/registration/api", api.createFlowHandler(flow.KindRegistration, false))
 	tenanted.HandleFunc("GET /self-service/registration/browser", api.createFlowHandler(flow.KindRegistration, true))
+	tenanted.HandleFunc("GET /self-service/flows/{id}", api.readFlow)
 	tenanted.HandleFunc("POST /self-service/registration", api.submitRegistration)
 	tenanted.HandleFunc("POST /self-service/login/api", api.createFlowHandler(flow.KindLogin, false))
 	tenanted.HandleFunc("GET /self-service/login/browser", api.createFlowHandler(flow.KindLogin, true))

@@ -177,7 +177,7 @@ func (a *publicAPI) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -283,15 +283,16 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
 	var (
-		outcome verifyOutcome
-		sess    *session.Session
-		token   string
-		browser bool
+		outcome  verifyOutcome
+		sess     *session.Session
+		token    string
+		browser  bool
+		returnTo string
 	)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
@@ -299,6 +300,7 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -330,19 +332,24 @@ func (a *publicAPI) submitLoginTOTP(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "login flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "login flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case err != nil:
 		internalError(w, err)
 	case outcome == verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; start over")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID,
+			http.StatusBadRequest, "too many attempts; start over")
 	case outcome == verifyWrongCode:
-		writeError(w, http.StatusUnauthorized, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID, http.StatusUnauthorized, "incorrect code")
 	default:
 		resp := map[string]any{"state": "active", "session": sess}
 		if browser {
 			setSessionCookie(w, r, token, sess.ExpiresAt)
+			if a.redirectAfterSuccess(w, r, t, returnTo) {
+				return
+			}
 		} else {
 			resp["session_token"] = token
 		}
@@ -364,7 +371,7 @@ func (a *publicAPI) submitRecoveryTOTP(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -402,18 +409,26 @@ func (a *publicAPI) submitRecoveryTOTP(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "recovery flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
-		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "recovery code not yet verified")
 	case err != nil:
 		internalError(w, err)
 	case outcome == verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; start recovery again")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "too many attempts; start recovery again")
 	case outcome == verifyWrongCode:
-		writeError(w, http.StatusBadRequest, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID, http.StatusBadRequest, "incorrect code")
 	default:
+		// The factor is proven; the recovery screen now owes a password.
+		a.advanceFlow(r, t, flowID, flow.StatePasswordRequired)
+		if a.redirectToScreen(w, r, t, flow.KindRecovery, flowID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"state": "set_password"})
 	}
 }

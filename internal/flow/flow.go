@@ -23,12 +23,46 @@ const (
 // Lifetime is how long a flow may sit unsubmitted.
 const Lifetime = 30 * time.Minute
 
+// State names the step a flow is waiting on, so a UI that re-reads the
+// flow after a redirect knows which screen to render.
+const (
+	StateChooseMethod         = "choose_method"          // the flow's opening step
+	StateMFARequired          = "mfa_required"           // password proven, second factor owed
+	StateCodeRequired         = "code_required"          // a One-Time Code is outstanding
+	StateSecondFactorRequired = "second_factor_required" // recovery code proven, second factor owed
+	StatePasswordRequired     = "password_required"      // recovery proven, new password owed
+)
+
+// MessageType classifies a UI message.
+const (
+	MessageError   = "error"
+	MessageInfo    = "info"
+	MessageSuccess = "success"
+)
+
+// Message is one thing to tell the person driving the flow. Messages are
+// persisted on the flow so a redirected browser can read back why its
+// submission failed.
+type Message struct {
+	Type    string   `json:"type"`
+	Text    string   `json:"text"`
+	Details []string `json:"details,omitempty"`
+}
+
 type Flow struct {
 	ID        string          `json:"id"`
 	Kind      Kind            `json:"kind"`
 	ExpiresAt time.Time       `json:"expires_at"`
+	State     string          `json:"state,omitempty"`
+	Messages  []Message       `json:"messages,omitempty"`
 	Browser   bool            `json:"-"`
 	Context   json.RawMessage `json:"-"`
+	// ReturnTo is where a completed browser flow sends the browser;
+	// validated against the tenant's allow-list when the flow is created.
+	ReturnTo string `json:"-"`
+	// CSRFFingerprint binds the flow to the browser that created it, so
+	// only that browser can read the flow back.
+	CSRFFingerprint string `json:"-"`
 }
 
 // VerificationContext is the server-side state of a verification flow:

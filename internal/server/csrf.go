@@ -56,6 +56,17 @@ func csrfSecret(r *http.Request) string {
 	return ""
 }
 
+// csrfFingerprint identifies a browser by its CSRF secret without
+// storing the secret itself. A browser flow records it at creation so
+// only that browser can read the flow back.
+func csrfFingerprint(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(secret))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
 func csrfToken(secret, scope string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(scope))

@@ -44,19 +44,86 @@ type Config struct {
 	SMSDailyCap int `json:"sms_daily_cap,omitempty"`
 	// MFA is the second-factor policy: off, optional (default), required.
 	MFA string `json:"mfa,omitempty"`
+	// UI names the tenant's own screens; Browser Flows drive HTML
+	// clients there by redirect (ADR 0006).
+	UI UIConfig `json:"ui,omitempty"`
 	// LoginURL is the tenant's own login UI; OAuth2 authorization
 	// requests redirect there with a login_challenge (Hydra-style).
+	//
+	// Deprecated: superseded by UI.LoginURL, still read as a fallback.
 	LoginURL string `json:"login_url,omitempty"`
 	// SocialReturnURL is where the browser lands after a social sign-in
 	// round trip (falls back to LoginURL).
+	//
+	// Deprecated: superseded by UI.DefaultReturnURL, still read as a
+	// fallback.
 	SocialReturnURL string `json:"social_return_url,omitempty"`
 }
 
-func (c Config) EffectiveSocialReturnURL() string {
-	if c.SocialReturnURL != "" {
-		return c.SocialReturnURL
+// UIConfig points at the tenant's screens. Each Self-Service Flow kind
+// has its own screen, plus one screen for failures that have no flow to
+// return to and one landing place for completed flows.
+type UIConfig struct {
+	LoginURL         string `json:"login_url,omitempty"`
+	RegistrationURL  string `json:"registration_url,omitempty"`
+	RecoveryURL      string `json:"recovery_url,omitempty"`
+	VerificationURL  string `json:"verification_url,omitempty"`
+	ErrorURL         string `json:"error_url,omitempty"`
+	DefaultReturnURL string `json:"default_return_url,omitempty"`
+	// AllowedReturnURLs widens the return_to allow-list beyond the
+	// origins of the screens above (for apps served from another origin).
+	AllowedReturnURLs []string `json:"allowed_return_urls,omitempty"`
+}
+
+// EffectiveLoginUIURL is the login screen: the new block first, then the
+// deprecated top-level field.
+func (c Config) EffectiveLoginUIURL() string {
+	if c.UI.LoginURL != "" {
+		return c.UI.LoginURL
 	}
 	return c.LoginURL
+}
+
+func (c Config) EffectiveRegistrationUIURL() string { return c.UI.RegistrationURL }
+func (c Config) EffectiveRecoveryUIURL() string     { return c.UI.RecoveryURL }
+func (c Config) EffectiveVerificationUIURL() string { return c.UI.VerificationURL }
+func (c Config) EffectiveErrorUIURL() string        { return c.UI.ErrorURL }
+
+// EffectiveDefaultReturnURL is where a completed Browser Flow lands when
+// the flow carries no return_to.
+func (c Config) EffectiveDefaultReturnURL() string {
+	if c.UI.DefaultReturnURL != "" {
+		return c.UI.DefaultReturnURL
+	}
+	return c.SocialReturnURL
+}
+
+// EffectiveSocialReturnURL is where a social sign-in round trip lands.
+func (c Config) EffectiveSocialReturnURL() string {
+	if u := c.EffectiveDefaultReturnURL(); u != "" {
+		return u
+	}
+	return c.EffectiveLoginUIURL()
+}
+
+// UIScreenURLs are every configured screen, the origins of which are
+// implicitly allowed as return_to targets.
+func (c Config) UIScreenURLs() []string {
+	candidates := []string{
+		c.EffectiveLoginUIURL(),
+		c.UI.RegistrationURL,
+		c.UI.RecoveryURL,
+		c.UI.VerificationURL,
+		c.UI.ErrorURL,
+		c.EffectiveDefaultReturnURL(),
+	}
+	var out []string
+	for _, u := range candidates {
+		if u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 func (c Config) EffectiveMFA() string {

@@ -24,10 +24,24 @@ func ValidUUID(s string) bool {
 	return uuidPattern.MatchString(s)
 }
 
+// FlowOptions carries what a browser flow needs beyond its context:
+// where to land when it completes, which browser owns it, and which step
+// it opens on. All fields are optional.
+type FlowOptions struct {
+	ReturnTo        string
+	CSRFFingerprint string
+	State           string
+}
+
 // CreateFlow starts a new self-service flow for the current tenant.
 // flowContext carries server-side state (nil for flows that need none);
 // browser flows carry CSRF protection.
 func CreateFlow(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind, flowContext any, browser bool) (*flow.Flow, error) {
+	return CreateFlowWith(ctx, tx, tenantID, kind, flowContext, browser, FlowOptions{})
+}
+
+// CreateFlowWith is CreateFlow with the browser-flow extras filled in.
+func CreateFlowWith(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind, flowContext any, browser bool, opts FlowOptions) (*flow.Flow, error) {
 	raw := []byte(`{}`)
 	if flowContext != nil {
 		var err error
@@ -35,11 +49,16 @@ func CreateFlow(ctx context.Context, tx pgx.Tx, tenantID string, kind flow.Kind,
 			return nil, err
 		}
 	}
-	f := &flow.Flow{Kind: kind, Context: raw, Browser: browser}
+	f := &flow.Flow{
+		Kind: kind, Context: raw, Browser: browser,
+		State: opts.State, ReturnTo: opts.ReturnTo, CSRFFingerprint: opts.CSRFFingerprint,
+	}
 	err := tx.QueryRow(ctx,
-		`INSERT INTO flows (tenant_id, kind, expires_at, context, browser) VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO flows (tenant_id, kind, expires_at, context, browser, state, return_to, csrf_fp)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id::text, expires_at`,
 		tenantID, kind, time.Now().Add(flow.Lifetime), raw, browser,
+		opts.State, opts.ReturnTo, opts.CSRFFingerprint,
 	).Scan(&f.ID, &f.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -54,18 +73,64 @@ func GetFlow(ctx context.Context, tx pgx.Tx, id string, kind flow.Kind) (*flow.F
 		return nil, ErrFlowNotFound
 	}
 	f := &flow.Flow{Kind: kind}
+	var msgs []byte
 	err := tx.QueryRow(ctx,
-		`SELECT id::text, expires_at, context, browser FROM flows
+		`SELECT id::text, expires_at, context, browser, state, ui_messages, return_to, csrf_fp FROM flows
 		  WHERE id = $1 AND kind = $2 AND expires_at > now() FOR UPDATE`,
 		id, kind,
-	).Scan(&f.ID, &f.ExpiresAt, &f.Context, &f.Browser)
+	).Scan(&f.ID, &f.ExpiresAt, &f.Context, &f.Browser, &f.State, &msgs, &f.ReturnTo, &f.CSRFFingerprint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrFlowNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	if err := json.Unmarshal(msgs, &f.Messages); err != nil {
+		return nil, err
+	}
 	return f, nil
+}
+
+// FlowByID loads an unexpired flow of any kind without locking it: the
+// read-only view a UI renders after landing on its screen.
+func FlowByID(ctx context.Context, tx pgx.Tx, id string) (*flow.Flow, error) {
+	if !uuidPattern.MatchString(id) {
+		return nil, ErrFlowNotFound
+	}
+	f := &flow.Flow{}
+	var msgs []byte
+	err := tx.QueryRow(ctx,
+		`SELECT id::text, kind, expires_at, context, browser, state, ui_messages, return_to, csrf_fp FROM flows
+		  WHERE id = $1 AND expires_at > now()`,
+		id,
+	).Scan(&f.ID, &f.Kind, &f.ExpiresAt, &f.Context, &f.Browser, &f.State, &msgs, &f.ReturnTo, &f.CSRFFingerprint)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrFlowNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(msgs, &f.Messages); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// SetFlowUI records the step a flow waits on and the messages its UI
+// should show. A failed submission rolls its own transaction back, so
+// this runs in a transaction of its own — otherwise the messages would
+// vanish with the failure that produced them.
+func SetFlowUI(ctx context.Context, tx pgx.Tx, id, state string, msgs []flow.Message) error {
+	if msgs == nil {
+		msgs = []flow.Message{}
+	}
+	raw, err := json.Marshal(msgs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE flows SET state = $2, ui_messages = $3 WHERE id = $1`, id, state, raw)
+	return err
 }
 
 // UpdateFlowContext replaces a flow's server-side context.

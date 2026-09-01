@@ -477,14 +477,40 @@ components:
           type: string
           enum: [off, optional, required]
           description: Default optional
+        ui:
+          type: object
+          description: |
+            The tenant's own screens. Browser Flows drive HTML clients
+            here by redirect; each flow kind has its own screen.
+          properties:
+            login_url: { type: string, format: uri, description: "Login screen; OAuth2 challenges redirect here too" }
+            registration_url: { type: string, format: uri }
+            recovery_url: { type: string, format: uri }
+            verification_url: { type: string, format: uri }
+            error_url:
+              type: string
+              format: uri
+              description: Where failures with no flow to return to land, with a ?code= parameter
+            default_return_url:
+              type: string
+              format: uri
+              description: Where a completed Browser Flow lands when it carries no return_to
+            allowed_return_urls:
+              type: array
+              items: { type: string, format: uri }
+              description: |
+                Extra return_to targets beyond the origins of the screens
+                above (for apps served from another origin).
         login_url:
           type: string
           format: uri
-          description: The tenant's login UI (OAuth2 challenges redirect here)
+          deprecated: true
+          description: Superseded by ui.login_url; still read as a fallback
         social_return_url:
           type: string
           format: uri
-          description: Where social sign-in round trips land
+          deprecated: true
+          description: Superseded by ui.default_return_url; still read as a fallback
     Tenant:
       type: object
       properties:

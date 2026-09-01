@@ -14,6 +14,18 @@ info:
     every submission, and set the `pratu_session` cookie instead of
     returning a session token.
 
+    **Browser flows are content-negotiated.** A client that prefers
+    `text/html` — or posts `application/x-www-form-urlencoded` — is driven
+    by 303 redirects to the tenant's configured screens: flow creation
+    lands on the screen with `?flow=`, a failed submission returns there
+    with its messages persisted on the flow, a failure with no flow left
+    to return to lands on the error screen with `?code=`, and a completed
+    flow lands on `return_to` (validated against the tenant's allow-list)
+    or the tenant's default return URL. A client that asks for
+    `application/json` gets the JSON responses documented below,
+    unchanged. Screens re-read the flow with
+    `GET /self-service/flows/{id}`.
+
     Cookie-authenticated requests to state-changing session endpoints
     (MFA enrolment, logout, session revocation, OAuth2 accept) require the
     session-scope CSRF token in `X-CSRF-Token`, bootstrapped from
@@ -69,9 +81,12 @@ paths:
     get:
       tags: [registration]
       summary: Create a registration browser flow (sets the CSRF cookie)
-      parameters: [{ $ref: "#/components/parameters/schemaName" }]
+      parameters:
+        - { $ref: "#/components/parameters/schemaName" }
+        - { $ref: "#/components/parameters/returnTo" }
       responses:
         "200": { $ref: "#/components/responses/Flow" }
+        "303": { $ref: "#/components/responses/ScreenRedirect" }
         "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /self-service/registration:
@@ -118,9 +133,31 @@ paths:
     get:
       tags: [login]
       summary: Create a login browser flow (sets the CSRF cookie)
+      parameters: [{ $ref: "#/components/parameters/returnTo" }]
       responses:
         "200": { $ref: "#/components/responses/Flow" }
+        "303": { $ref: "#/components/responses/ScreenRedirect" }
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  /self-service/flows/{id}:
+    get:
+      tags: [login]
+      summary: Read a browser flow
+      description: |
+        What the tenant's screen renders after a redirect: the step the
+        flow waits on (`state`), the fields to show, the second-factor
+        methods available, and the messages from the last submission.
+        Readable only by the browser that created the flow (its CSRF
+        cookie must match); API flows are not exposed here.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { $ref: "#/components/responses/Flow" }
+        "404": { $ref: "#/components/responses/Error" }
   /self-service/login:
     post:
       tags: [login]
@@ -245,8 +282,11 @@ paths:
     get:
       tags: [recovery]
       summary: Create a recovery browser flow (sets the CSRF cookie)
+      parameters: [{ $ref: "#/components/parameters/returnTo" }]
       responses:
         "200": { $ref: "#/components/responses/Flow" }
+        "303": { $ref: "#/components/responses/ScreenRedirect" }
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /self-service/recovery:
     post:
@@ -779,6 +819,16 @@ components:
       in: query
       required: true
       schema: { type: string, format: uuid }
+    returnTo:
+      name: return_to
+      in: query
+      required: false
+      description: |
+        Where to send the browser when the flow completes. Must be
+        same-origin, share an origin with one of the tenant's configured
+        screens, or match `ui.allowed_return_urls`; anything else is
+        rejected with 400.
+      schema: { type: string }
     challenge:
       name: challenge
       in: query
@@ -841,6 +891,14 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Flow" }
+    ScreenRedirect:
+      description: |
+        HTML clients only: the browser is sent to the tenant's screen
+        (`?flow=`), to the error screen (`?code=`), or to the flow's
+        return URL.
+      headers:
+        Location:
+          schema: { type: string, format: uri }
     Error:
       description: Error
       content:
@@ -869,8 +927,23 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        kind: { type: string, enum: [registration, login, recovery] }
+        kind: { type: string, enum: [registration, login, recovery, verification] }
         expires_at: { type: string, format: date-time }
+        state:
+          type: string
+          enum: [choose_method, mfa_required, code_required, second_factor_required, password_required]
+          description: The step the flow waits on
+        messages:
+          type: array
+          description: What the screen should say, carried across a redirect
+          items:
+            type: object
+            properties:
+              type: { type: string, enum: [error, info, success] }
+              text: { type: string }
+              details:
+                type: array
+                items: { type: string }
         csrf_token: { type: string, description: Present on browser flows only }
         ui:
           type: object
@@ -884,6 +957,10 @@ components:
                   type: { type: string }
                   title: { type: string }
                   required: { type: boolean }
+            methods:
+              type: array
+              description: Second factors this flow can be continued with
+              items: { type: string, enum: [totp, sms] }
     Address:
       type: object
       properties:

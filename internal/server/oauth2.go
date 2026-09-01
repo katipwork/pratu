@@ -94,8 +94,12 @@ func (a *publicAPI) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !a.allow(w, r, "flow:ip:"+clientIP(r), limitFlowCreatePerIP, time.Minute) {
 		return
 	}
-	if t.Config.LoginURL == "" {
-		writeError(w, http.StatusBadRequest, "tenant has no login_url configured; OAuth2 flows need a login UI")
+	loginUI := t.Config.EffectiveLoginUIURL()
+	if loginUI == "" {
+		loginUI = a.defaultScreen()
+	}
+	if loginUI == "" {
+		writeError(w, http.StatusBadRequest, "tenant has no ui.login_url configured; OAuth2 flows need a login UI")
 		return
 	}
 	issuer := issuerFromRequest(r)
@@ -117,11 +121,7 @@ func (a *publicAPI) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		sep := "?"
-		if strings.Contains(t.Config.LoginURL, "?") {
-			sep = "&"
-		}
-		http.Redirect(w, r, t.Config.LoginURL+sep+"login_challenge="+f.ID, http.StatusFound)
+		http.Redirect(w, r, withParam(loginUI, "login_challenge", f.ID), http.StatusFound)
 		return nil
 	})
 	if err != nil {

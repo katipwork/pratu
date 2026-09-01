@@ -60,5 +60,5 @@ A stateful, server-driven interaction (login, registration, recovery, …) expos
 _Avoid_: Form, wizard, journey
 
 **Browser Flow**:
-A Self-Service Flow whose client authenticates with the host-scoped session cookie instead of bearer tokens; it carries CSRF protection, and completing it sets the cookie rather than returning a session token.
+A Self-Service Flow whose client authenticates with the host-scoped session cookie instead of bearer tokens; it carries CSRF protection, and completing it sets the cookie rather than returning a session token. Clients that ask for HTML are driven by redirects to the tenant's configured UI screens — errors return the browser to the flow's screen, never as raw JSON; clients that ask for JSON get the flow as JSON.
 _Avoid_: Web flow, cookie mode

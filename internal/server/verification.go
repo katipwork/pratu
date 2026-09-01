@@ -37,11 +37,16 @@ func (a *publicAPI) startVerification(r *http.Request, tx pgx.Tx, t *tenant.Tena
 	if err := a.allowSend(ctx, t, addr.Channel, addr.Value); err != nil {
 		return nil, err
 	}
-	vf, err := storage.CreateFlow(ctx, tx, t.ID, flow.KindVerification, flow.VerificationContext{
+	vf, err := storage.CreateFlowWith(ctx, tx, t.ID, flow.KindVerification, flow.VerificationContext{
 		IdentityID:   identityID,
 		AddressID:    addr.ID,
 		IssueSession: issueSession,
-	}, browser)
+	}, browser, storage.FlowOptions{
+		// The verification screen is the browser's next stop, so the flow
+		// is bound to the same browser and opens on its code step.
+		CSRFFingerprint: csrfFingerprint(csrfSecret(r)),
+		State:           flow.StateCodeRequired,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -93,16 +98,17 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
 	var (
-		outcome verifyOutcome
-		ident   *identity.Identity
-		sess    *session.Session
-		token   string
-		browser bool
+		outcome  verifyOutcome
+		ident    *identity.Identity
+		sess     *session.Session
+		token    string
+		browser  bool
+		returnTo string
 	)
 	// Failed attempts must still commit (the attempt counter is the code's
 	// brute-force budget), so non-infrastructure failures set outcome and
@@ -113,6 +119,7 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -160,11 +167,12 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	if errors.Is(err, storage.ErrFlowNotFound) || errors.Is(err, storage.ErrNoCode) {
-		writeError(w, http.StatusBadRequest, "verification flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "verification flow not found or expired")
 		return
 	}
 	if errors.Is(err, errCSRF) {
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 		return
 	}
 	if err != nil {
@@ -174,11 +182,14 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 
 	switch outcome {
 	case verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; request a new code")
+		a.failSubmission(w, r, t, flow.KindVerification, flowID,
+			http.StatusBadRequest, "too many attempts; request a new code")
 	case verifyCodeExpired:
-		writeError(w, http.StatusBadRequest, "code expired; request a new code")
+		a.failSubmission(w, r, t, flow.KindVerification, flowID,
+			http.StatusBadRequest, "code expired; request a new code")
 	case verifyWrongCode:
-		writeError(w, http.StatusBadRequest, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindVerification, flowID,
+			http.StatusBadRequest, "incorrect code")
 	default:
 		resp := map[string]any{"state": "verified", "identity": ident}
 		if sess != nil {
@@ -188,6 +199,9 @@ func (a *publicAPI) submitVerification(w http.ResponseWriter, r *http.Request) {
 			} else {
 				resp["session_token"] = token
 			}
+		}
+		if browser && a.redirectAfterSuccess(w, r, t, returnTo) {
+			return
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -202,7 +216,7 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readOptionalJSON(w, r, &body) {
+	if !readOptionalSubmission(w, r, &body) {
 		return
 	}
 
@@ -240,14 +254,21 @@ func (a *publicAPI) resendVerification(w http.ResponseWriter, r *http.Request) {
 	var rl errRateLimited
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "verification flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "verification flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.As(err, &rl):
-		writeRateLimited(w, rl.retryAfter)
+		if !a.redirectToError(w, r, t, errCodeRateLimited) {
+			writeRateLimited(w, rl.retryAfter)
+		}
 	case err != nil:
 		internalError(w, err)
 	default:
+		// The code is on its way; the browser stays on the same screen.
+		if a.redirectToScreen(w, r, t, flow.KindVerification, flowID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"state": "sent"})
 	}
 }

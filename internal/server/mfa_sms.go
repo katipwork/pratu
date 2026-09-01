@@ -95,7 +95,7 @@ func (a *publicAPI) enrollSMS(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Phone string `json:"phone"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 	phone, ok := identity.NormalizePhone(body.Phone)
@@ -183,7 +183,7 @@ func (a *publicAPI) confirmSMS(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -284,7 +284,7 @@ func (a *publicAPI) loginSMSSend(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readOptionalJSON(w, r, &body) {
+	if !readOptionalSubmission(w, r, &body) {
 		return
 	}
 
@@ -314,7 +314,7 @@ func (a *publicAPI) loginSMSSend(w http.ResponseWriter, r *http.Request) {
 		masked = maskAddress(identity.ChannelSMS, phone)
 		return a.sendFactorCode(r.Context(), tx, t, f.ID, phone, "mfa_code")
 	})
-	a.respondFactorSend(w, err, masked)
+	a.respondFactorSend(w, r, t, flow.KindLogin, flowID, err, masked)
 }
 
 // loginSMSSubmit completes a held login with the delivered code.
@@ -329,15 +329,16 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
 	var (
-		outcome verifyOutcome
-		sess    *session.Session
-		token   string
-		browser bool
+		outcome  verifyOutcome
+		sess     *session.Session
+		token    string
+		browser  bool
+		returnTo string
 	)
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
@@ -345,6 +346,7 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -367,21 +369,27 @@ func (a *publicAPI) loginSMSSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "login flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "login flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case err != nil:
 		internalError(w, err)
 	case outcome == verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; start over")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID,
+			http.StatusBadRequest, "too many attempts; start over")
 	case outcome == verifyCodeExpired:
-		writeError(w, http.StatusBadRequest, "code expired; request a new one")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID,
+			http.StatusBadRequest, "code expired; request a new one")
 	case outcome == verifyWrongCode:
-		writeError(w, http.StatusUnauthorized, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindLogin, flowID, http.StatusUnauthorized, "incorrect code")
 	default:
 		resp := map[string]any{"state": "active", "session": sess}
 		if browser {
 			setSessionCookie(w, r, token, sess.ExpiresAt)
+			if a.redirectAfterSuccess(w, r, t, returnTo) {
+				return
+			}
 		} else {
 			resp["session_token"] = token
 		}
@@ -400,7 +408,7 @@ func (a *publicAPI) recoverySMSSend(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readOptionalJSON(w, r, &body) {
+	if !readOptionalSubmission(w, r, &body) {
 		return
 	}
 
@@ -432,7 +440,7 @@ func (a *publicAPI) recoverySMSSend(w http.ResponseWriter, r *http.Request) {
 		// recorded); the factor code takes its slot on the flow.
 		return a.sendFactorCode(r.Context(), tx, t, f.ID, phone, "mfa_code")
 	})
-	a.respondFactorSend(w, err, masked)
+	a.respondFactorSend(w, r, t, flow.KindRecovery, flowID, err, masked)
 }
 
 // recoverySMSSubmit proves the SMS factor within recovery.
@@ -447,7 +455,7 @@ func (a *publicAPI) recoverySMSSubmit(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -476,40 +484,58 @@ func (a *publicAPI) recoverySMSSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "recovery flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
-		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "recovery code not yet verified")
 	case err != nil:
 		internalError(w, err)
 	case outcome == verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; start recovery again")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "too many attempts; start recovery again")
 	case outcome == verifyCodeExpired:
-		writeError(w, http.StatusBadRequest, "code expired; request a new one")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "code expired; request a new one")
 	case outcome == verifyWrongCode:
-		writeError(w, http.StatusBadRequest, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID, http.StatusBadRequest, "incorrect code")
 	default:
+		a.advanceFlow(r, t, flowID, flow.StatePasswordRequired)
+		if a.redirectToScreen(w, r, t, flow.KindRecovery, flowID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"state": "set_password"})
 	}
 }
 
-func (a *publicAPI) respondFactorSend(w http.ResponseWriter, err error, masked string) {
+// respondFactorSend answers a second-factor code delivery: a browser
+// stays on the screen that asked for it.
+func (a *publicAPI) respondFactorSend(w http.ResponseWriter, r *http.Request, t *tenant.Tenant,
+	kind flow.Kind, flowID string, err error, masked string) {
+
 	var rl errRateLimited
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired, http.StatusBadRequest, "flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
-		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
+		a.failSubmission(w, r, t, kind, flowID,
+			http.StatusBadRequest, "recovery code not yet verified")
 	case errors.Is(err, errNoSMSFactor):
-		writeError(w, http.StatusBadRequest, "no SMS factor enrolled")
+		a.failSubmission(w, r, t, kind, flowID, http.StatusBadRequest, "no SMS factor enrolled")
 	case errors.As(err, &rl):
-		writeRateLimited(w, rl.retryAfter)
+		if !a.redirectToError(w, r, t, errCodeRateLimited) {
+			writeRateLimited(w, rl.retryAfter)
+		}
 	case err != nil:
 		internalError(w, err)
 	default:
+		if a.redirectToScreen(w, r, t, kind, flowID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"state": "sent", "address": masked})
 	}
 }

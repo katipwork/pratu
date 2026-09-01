@@ -33,7 +33,7 @@ func (a *publicAPI) submitRecoveryAddress(w http.ResponseWriter, r *http.Request
 		Address   string `json:"address"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -82,15 +82,24 @@ func (a *publicAPI) submitRecoveryAddress(w http.ResponseWriter, r *http.Request
 		})
 	})
 	if errors.Is(err, storage.ErrFlowNotFound) {
-		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "recovery flow not found or expired")
 		return
 	}
 	if errors.Is(err, errCSRF) {
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 		return
 	}
 	if err != nil {
 		internalError(w, err)
+		return
+	}
+	// The flow moves to its code step whether or not the address existed:
+	// the screen must look identical either way.
+	a.advanceFlow(r, t, flowID, flow.StateCodeRequired, flow.Message{
+		Type: flow.MessageInfo, Text: "if the address exists, a code was sent to it",
+	})
+	if a.redirectToScreen(w, r, t, flow.KindRecovery, flowID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -110,7 +119,7 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 		Code      string `json:"code"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
 
@@ -172,11 +181,12 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if errors.Is(err, storage.ErrFlowNotFound) {
-		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "recovery flow not found or expired")
 		return
 	}
 	if errors.Is(err, errCSRF) {
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 		return
 	}
 	if err != nil {
@@ -186,12 +196,22 @@ func (a *publicAPI) submitRecoveryCode(w http.ResponseWriter, r *http.Request) {
 
 	switch outcome {
 	case verifyTooManyAttempts:
-		writeError(w, http.StatusBadRequest, "too many attempts; start recovery again")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "too many attempts; start recovery again")
 	case verifyCodeExpired:
-		writeError(w, http.StatusBadRequest, "code expired; start recovery again")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "code expired; start recovery again")
 	case verifyWrongCode:
-		writeError(w, http.StatusBadRequest, "incorrect code")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID, http.StatusBadRequest, "incorrect code")
 	default:
+		state := flow.StatePasswordRequired
+		if factorMethods != nil {
+			state = flow.StateSecondFactorRequired
+		}
+		a.advanceFlow(r, t, flowID, state)
+		if a.redirectToScreen(w, r, t, flow.KindRecovery, flowID) {
+			return
+		}
 		resp := map[string]any{"state": nextState}
 		if factorMethods != nil {
 			resp["methods"] = factorMethods
@@ -211,10 +231,10 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		Password  string `json:"password"`
 		CSRFToken string `json:"csrf_token"`
 	}
-	if !readJSON(w, r, &body) {
+	if !readSubmission(w, r, &body) {
 		return
 	}
-	if !a.validatePassword(w, r, t, body.Password) {
+	if !a.validatePassword(w, r, t, flow.KindRecovery, flowID, body.Password) {
 		return
 	}
 	hash, err := argon2id.CreateHash(body.Password, argon2id.DefaultParams)
@@ -224,11 +244,12 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		ident   *identity.Identity
-		sess    *session.Session
-		token   string
-		aal     string
-		browser bool
+		ident    *identity.Identity
+		sess     *session.Session
+		token    string
+		aal      string
+		browser  bool
+		returnTo string
 	)
 	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRecovery)
@@ -236,6 +257,7 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 			return err
 		}
 		browser = f.Browser
+		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -284,13 +306,16 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 	})
 	switch {
 	case errors.Is(err, storage.ErrFlowNotFound):
-		writeError(w, http.StatusBadRequest, "recovery flow not found or expired")
+		a.failFatal(w, r, t, errCodeFlowExpired,
+			http.StatusBadRequest, "recovery flow not found or expired")
 	case errors.Is(err, errCSRF):
-		writeError(w, http.StatusForbidden, "invalid or missing csrf_token")
+		a.failFatal(w, r, t, errCodeCSRF, http.StatusForbidden, "invalid or missing csrf_token")
 	case errors.Is(err, errRecoveryNotProven):
-		writeError(w, http.StatusBadRequest, "recovery code not yet verified")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID,
+			http.StatusBadRequest, "recovery code not yet verified")
 	case errors.Is(err, errSecondFactorRequired):
-		writeError(w, http.StatusForbidden, "second factor required; prove it via /self-service/recovery/totp or /self-service/recovery/sms first")
+		a.failSubmission(w, r, t, flow.KindRecovery, flowID, http.StatusForbidden,
+			"second factor required; prove it via /self-service/recovery/totp or /self-service/recovery/sms first")
 	case err != nil:
 		internalError(w, err)
 	default:
@@ -301,6 +326,9 @@ func (a *publicAPI) submitRecoveryPassword(w http.ResponseWriter, r *http.Reques
 		}
 		if browser {
 			setSessionCookie(w, r, token, sess.ExpiresAt)
+			if a.redirectAfterSuccess(w, r, t, returnTo) {
+				return
+			}
 		} else {
 			resp["session_token"] = token
 		}

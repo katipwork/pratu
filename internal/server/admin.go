@@ -88,6 +88,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		Password     tenant.PasswordConfig `json:"password"`
 		SMSDailyCap  int                   `json:"sms_daily_cap"`
 		MFA          string                `json:"mfa"`
+		UI           tenant.UIConfig       `json:"ui"`
 		LoginURL     string                `json:"login_url"`
 		SocialReturn string                `json:"social_return_url"`
 	}
@@ -126,12 +127,18 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, raw := range []string{body.LoginURL, body.SocialReturn} {
+	screens := []string{
+		body.LoginURL, body.SocialReturn,
+		body.UI.LoginURL, body.UI.RegistrationURL, body.UI.RecoveryURL,
+		body.UI.VerificationURL, body.UI.ErrorURL, body.UI.DefaultReturnURL,
+	}
+	screens = append(screens, body.UI.AllowedReturnURLs...)
+	for _, raw := range screens {
 		if raw == "" {
 			continue
 		}
 		if u, err := url.Parse(raw); err != nil || !u.IsAbs() {
-			writeError(w, http.StatusBadRequest, "login_url and social_return_url must be absolute URLs")
+			writeError(w, http.StatusBadRequest, "ui screen URLs must be absolute URLs")
 			return
 		}
 	}
@@ -141,6 +148,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		Password:        body.Password,
 		SMSDailyCap:     body.SMSDailyCap,
 		MFA:             body.MFA,
+		UI:              body.UI,
 		LoginURL:        body.LoginURL,
 		SocialReturnURL: body.SocialReturn,
 	}

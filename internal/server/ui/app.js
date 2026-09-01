@@ -1,6 +1,9 @@
 // Pratu reference login UI. Zero dependencies; drives the browser flow
-// API with cookies + CSRF. Reads ?login_challenge= (OAuth2 handshake) and
-// the social-callback parameters (?mfa_flow, ?methods, ?mfa_csrf, ?error).
+// API with cookies + CSRF. Reads ?login_challenge= (OAuth2 handshake),
+// the social-callback parameters (?mfa_flow, ?methods, ?mfa_csrf, ?error),
+// and the redirect-driven parameters a Browser Flow lands with: ?flow=
+// (re-read the flow and render the step it waits on) and ?code= (a
+// failure with no flow left to return to).
 "use strict";
 
 const app = document.getElementById("app");
@@ -40,6 +43,14 @@ function errOf(resp) {
   if (!e) return `request failed (${resp.status})`;
   return e.message + (e.details ? ": " + e.details.join("; ") : "");
 }
+// showMessages renders whatever the flow carries back from a redirect.
+function showMessages(flow) {
+  const m = flow && flow.messages && flow.messages[0];
+  if (!m) return;
+  say(m.type === "error" ? "error" : "ok",
+    m.text + (m.details ? ": " + m.details.join("; ") : ""));
+}
+
 function busy(form, on) {
   form.querySelectorAll("button").forEach((b) => (b.disabled = on));
 }
@@ -56,8 +67,8 @@ function onSubmit(id, fn) {
 
 // ---- screens ---------------------------------------------------------
 
-async function loginScreen(notice) {
-  const flow = (await api("GET", "/self-service/login/browser")).body;
+async function loginScreen(notice, existing) {
+  const flow = existing || (await api("GET", "/self-service/login/browser")).body;
   const social = (await api("GET", "/self-service/social")).body || [];
   screen("Sign in", `
     <form id="f">
@@ -72,6 +83,7 @@ async function loginScreen(notice) {
       `</div>` : ""}
     <div class="links"><a href="#" id="to-register">Create account</a><a href="#" id="to-recovery">Forgot password?</a></div>`);
   if (notice) say(notice.kind, notice.text);
+  else showMessages(flow);
   document.getElementById("to-register").onclick = (e) => { e.preventDefault(); registerScreen(); };
   document.getElementById("to-recovery").onclick = (e) => { e.preventDefault(); recoveryScreen(); };
   app.querySelectorAll("[data-social]").forEach((b) =>
@@ -89,10 +101,13 @@ async function loginScreen(notice) {
   });
 }
 
-async function registerScreen() {
-  const resp = await api("GET", "/self-service/registration/browser");
-  if (!resp.ok) return say("error", errOf(resp));
-  const flow = resp.body;
+async function registerScreen(existing) {
+  let flow = existing;
+  if (!flow) {
+    const resp = await api("GET", "/self-service/registration/browser");
+    if (!resp.ok) return say("error", errOf(resp));
+    flow = resp.body;
+  }
   const traits = flow.ui.fields.filter((f) => f.name !== "password");
   screen("Create account", `
     <form id="f">
@@ -104,6 +119,7 @@ async function registerScreen() {
     </form>
     <div class="links"><a href="#" id="to-login">Back to sign in</a><span></span></div>`);
   document.getElementById("to-login").onclick = (e) => { e.preventDefault(); loginScreen(); };
+  showMessages(flow);
   onSubmit("f", async (fd) => {
     const t = {};
     traits.forEach((f) => { const v = fd.get(f.name); if (v) t[f.name] = v; });
@@ -118,7 +134,7 @@ async function registerScreen() {
 
 function verifyScreen(v) {
   screen("Check your " + (v.channel === "sms" ? "phone" : "email"), `
-    <p class="muted">We sent a code to ${esc(v.address)}.</p>
+    <p class="muted">${v.address ? `We sent a code to ${esc(v.address)}.` : "We sent you a code."}</p>
     <form id="f">
       <div><label for="code">Code</label>
         <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required></div>
@@ -161,10 +177,13 @@ function mfaScreen(flowId, csrf, methods) {
   });
 }
 
-async function recoveryScreen() {
-  const resp = await api("GET", "/self-service/recovery/browser");
-  if (!resp.ok) return say("error", errOf(resp));
-  const flow = resp.body;
+async function recoveryScreen(existing) {
+  let flow = existing;
+  if (!flow) {
+    const resp = await api("GET", "/self-service/recovery/browser");
+    if (!resp.ok) return say("error", errOf(resp));
+    flow = resp.body;
+  }
   screen("Recover your account", `
     <form id="f">
       <div><label for="address">Email or phone</label>
@@ -173,6 +192,7 @@ async function recoveryScreen() {
     </form>
     <div class="links"><a href="#" id="to-login">Back to sign in</a><span></span></div>`);
   document.getElementById("to-login").onclick = (e) => { e.preventDefault(); loginScreen(); };
+  showMessages(flow);
   onSubmit("f", async (fd) => {
     const r = await api("POST", `/self-service/recovery?flow=${flow.id}`, {
       address: fd.get("address"), csrf_token: flow.csrf_token,
@@ -189,6 +209,7 @@ function recoveryCodeScreen(flow) {
         <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required></div>
       <button>Continue</button>
     </form>`);
+  showMessages(flow);
   onSubmit("f", async (fd) => {
     const r = await api("POST", `/self-service/recovery/code?flow=${flow.id}`, {
       code: fd.get("code"), csrf_token: flow.csrf_token,
@@ -209,6 +230,7 @@ function recoveryFactorScreen(flow, methods) {
       <button>Continue</button>
       ${hasSms ? `<button class="secondary" type="button" id="send-sms">${hasTotp ? "Use SMS instead — send code" : "Send code"}</button>` : ""}
     </form>`);
+  showMessages(flow);
   let via = hasTotp ? "totp" : "sms";
   if (hasSms) document.getElementById("send-sms").onclick = async () => {
     const r = await api("POST", `/self-service/recovery/sms/send?flow=${flow.id}`, { csrf_token: flow.csrf_token });
@@ -230,6 +252,7 @@ function recoveryPasswordScreen(flow) {
         <input id="password" name="password" type="password" autocomplete="new-password" required></div>
       <button>Save and sign in</button>
     </form>`);
+  showMessages(flow);
   onSubmit("f", async (fd) => {
     const r = await api("POST", `/self-service/recovery/password?flow=${flow.id}`, {
       password: fd.get("password"), csrf_token: flow.csrf_token,
@@ -298,13 +321,54 @@ async function afterAuth() {
 
 // ---- entry -----------------------------------------------------------
 
+// Failure codes a Browser Flow can land on the error screen with.
+const codeText = {
+  flow_expired: "That took too long — start again.",
+  csrf_violation: "Your session could not be verified — start again.",
+  rate_limited: "Too many attempts — try again in a moment.",
+  unknown_schema: "That sign-up form is not available.",
+  internal_error: "Something went wrong on our side.",
+};
+
+// renderFlow picks the screen for a flow the server redirected us to,
+// from its kind and the step it waits on.
+async function renderFlow(id, notice) {
+  const resp = await api("GET", `/self-service/flows/${id}`);
+  if (!resp.ok) return loginScreen(notice || { kind: "error", text: errOf(resp) });
+  const f = resp.body;
+  const methods = (f.ui && f.ui.methods) || [];
+  switch (f.kind) {
+    case "registration":
+      return registerScreen(f);
+    case "verification":
+      return verifyScreen({ flow_id: f.id, csrf_token: f.csrf_token, channel: "", address: "" });
+    case "recovery":
+      if (f.state === "code_required") return recoveryCodeScreen(f);
+      if (f.state === "second_factor_required") return recoveryFactorScreen(f, methods);
+      if (f.state === "password_required") return recoveryPasswordScreen(f);
+      return recoveryScreen(f);
+    case "login":
+      if (f.state === "mfa_required") return mfaScreen(f.id, f.csrf_token, methods);
+      return loginScreen(notice, f);
+  }
+  return loginScreen(notice);
+}
+
 (async function init() {
   // Social callback handovers land here with query parameters.
   if (params.get("mfa_flow")) {
     return mfaScreen(params.get("mfa_flow"), params.get("mfa_csrf") || "", params.getAll("methods"));
   }
+  const failure = params.get("code");
   const notice = params.get("error")
-    ? { kind: "error", text: `Sign-in failed: ${params.get("error")}` } : null;
+    ? { kind: "error", text: `Sign-in failed: ${params.get("error")}` }
+    : failure
+      ? { kind: "error", text: codeText[failure] || `Something went wrong: ${failure}` }
+      : null;
+  // A Browser Flow redirected us here to render a step it is waiting on.
+  if (params.get("flow")) {
+    return renderFlow(params.get("flow"), notice);
+  }
   const who = await api("GET", "/sessions/whoami");
   if (who.ok && !notice) {
     return challenge() ? consentScreen(who.body) : homeScreen(who.body);

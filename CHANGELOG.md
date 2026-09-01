@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- Redirect-driven Browser Flows (ADR 0006): a Browser Flow client that
+  prefers `text/html` — or posts an HTML form — is now driven by 303
+  redirects to the tenant's own screens instead of being shown raw JSON.
+  Flow creation lands on the screen with `?flow=`, a failed submission
+  returns there with its messages persisted on the flow, failures with no
+  flow to return to land on the error screen with `?code=`, and completed
+  flows land on `return_to` or the tenant's default return URL. Clients
+  that ask for `application/json` keep the previous contract, and API
+  flows are untouched.
+- Browser Flow submissions accept `application/x-www-form-urlencoded`, so
+  a plain HTML form can drive a flow end to end (`traits.email=…` nests
+  into the traits object).
+- `GET /self-service/flows/{id}`: a screen re-reads the flow it landed
+  on — the step it waits on (`state`), the fields to render, available
+  second-factor methods, and the last submission's messages. Readable
+  only by the browser that created the flow.
+- Per-tenant `ui` config block: `login_url`, `registration_url`,
+  `recovery_url`, `verification_url`, `error_url`, `default_return_url`,
+  `allowed_return_urls`. It supersedes the top-level `login_url` (OAuth2
+  challenges now use `ui.login_url`) and `social_return_url`, both still
+  read as fallbacks. `return_to` is validated against the origins of the
+  configured screens plus the allow-list, so it cannot become an open
+  redirect.
+- Tenants that configure no screens fall back to the embedded reference
+  UI when the server serves it; the reference UI renders `?flow=` and
+  `?code=` landings.
+
+
 ## v0.2.0 — 2026-08-26
 
 - Custom domains: tenants claim hostnames outside the base domain
