@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.3.1 — 2026-09-02
+
+Security patch. No API change.
+
+- `go-jose/v3` 3.0.3 → 3.0.5, closing a parsing denial of service
+  (CVE-2025-27144) and a JWE decryption panic (CVE-2026-34986). This is
+  the one that mattered: `GET /oauth2/auth` reaches `jose.ParseSigned`
+  through fosite, so the vulnerable code sat behind an unauthenticated
+  endpoint.
+- `golang.org/x/crypto` 0.41.0 → 0.55.0, `golang.org/x/text` 0.29.0 →
+  0.41.0, and the transitive `grpc`, `otel`, `x/net`, and `protobuf`
+  modules fosite pulls in. The loud `x/crypto` advisories are all in its
+  `ssh`, `ssh/agent`, `ssh/knownhosts`, and `openpgp` packages, none of
+  which this binary links — upgraded to keep the tree clean, not because
+  they were reachable.
+- The `go` directive moves to 1.26.7, the toolchain the release image
+  already builds with (`golang:1.26-alpine`). CI resolves its Go version
+  from `go.mod`, so it had been testing on 1.26.1 — an older standard
+  library than the one shipping, with known reachable issues in
+  `crypto/tls`, `crypto/x509`, `net/http`, and `html/template`.
+
+`govulncheck ./...` now reports no vulnerabilities reachable from this
+code. Published images built before this release were already free of the
+standard-library issues; the `go-jose` one affected them.
+
 ## v0.3.0 — 2026-09-02
 
 - Redirect-driven Browser Flows (ADR 0006): a Browser Flow client that
