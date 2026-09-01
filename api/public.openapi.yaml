@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Pratu Public API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     The tenant-facing API. Every request is addressed to a tenant hostname
     (`{slug}.{base_domain}` or a custom domain): the Host header selects the

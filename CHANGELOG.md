@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 — 2026-09-02
 
 - Redirect-driven Browser Flows (ADR 0006): a Browser Flow client that
   prefers `text/html` — or posts an HTML form — is now driven by 303
@@ -37,6 +37,17 @@
   there too.
 - `storage.Migrate` takes an advisory lock, so replicas (or test suites)
   starting together no longer race to apply the same migration.
+- The compose database publishes on 35432, clear of a Postgres a
+  developer machine may already run on 5432.
+
+**Upgrading**: apply migration `0014_flow_ui_state.sql` (`pratu migrate`).
+Browser-flow clients that send `Accept: text/html` now receive redirects
+where they used to receive JSON; clients that ask for
+`application/json` — or send the `*/*` that `fetch` defaults to — are
+unaffected, as are API flows. A tenant with no `ui` block keeps the old
+responses unless the server serves the reference UI, in which case its
+HTML clients land there. `login_url` and `social_return_url` still work;
+`ui.login_url` and `ui.default_return_url` supersede them.
 
 
 ## v0.2.0 — 2026-08-26
