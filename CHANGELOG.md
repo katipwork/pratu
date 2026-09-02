@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-09-02
 
 - Passwordless first factor ([ADR 0007](docs/adr/0007-passwordless-first-factor.md),
   [#5](https://github.com/katipwork/pratu/issues/5)): a tenant may accept a
