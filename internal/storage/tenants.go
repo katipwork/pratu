@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,44 @@ func (s *TenantStore) Create(ctx context.Context, slug, name string, cfg tenant.
 }
 
 // List returns all tenants, newest first.
+// Update applies a change to one tenant's name and policy inside a
+// single transaction, with the row locked for the duration: two
+// operators editing at once queue instead of losing each other's change.
+// apply sees the stored tenant and mutates it; returning an error aborts
+// the write and surfaces unchanged.
+func (s *TenantStore) Update(ctx context.Context, slug string, apply func(*tenant.Tenant) error) (*tenant.Tenant, error) {
+	var t tenant.Tenant
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var config []byte
+		err := tx.QueryRow(ctx,
+			`SELECT id::text, slug, name, config FROM tenants WHERE slug = $1 FOR UPDATE`, slug,
+		).Scan(&t.ID, &t.Slug, &t.Name, &config)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tenant.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(config, &t.Config); err != nil {
+			return fmt.Errorf("parse tenant config: %w", err)
+		}
+		if err := apply(&t); err != nil {
+			return err
+		}
+		rawCfg, err := json.Marshal(t.Config)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx,
+			`UPDATE tenants SET name = $2, config = $3 WHERE id = $1`, t.ID, t.Name, rawCfg)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func (s *TenantStore) List(ctx context.Context) ([]tenant.Tenant, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id::text, slug, name, config FROM tenants ORDER BY created_at DESC`)

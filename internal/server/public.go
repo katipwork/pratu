@@ -43,6 +43,8 @@ func NewPublic(pool *pgxpool.Pool, resolver *tenant.Resolver, breach password.Br
 	tenanted.HandleFunc("POST /self-service/login/api", api.createFlowHandler(flow.KindLogin, false))
 	tenanted.HandleFunc("GET /self-service/login/browser", api.createFlowHandler(flow.KindLogin, true))
 	tenanted.HandleFunc("POST /self-service/login", api.submitLogin)
+	tenanted.HandleFunc("POST /self-service/login/code/send", api.loginCodeSend)
+	tenanted.HandleFunc("POST /self-service/login/code", api.loginCodeSubmit)
 	tenanted.HandleFunc("POST /self-service/verification", api.submitVerification)
 	tenanted.HandleFunc("POST /self-service/verification/resend", api.resendVerification)
 	tenanted.HandleFunc("POST /self-service/recovery/api", api.createFlowHandler(flow.KindRecovery, false))

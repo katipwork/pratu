@@ -34,6 +34,13 @@ const (
 	MFARequired = "required" // every login must end at aal2; unenrolled users are told to enrol
 )
 
+// First factor values: the proofs that open a session from nothing.
+// Codes are opt-in per tenant (ADR 0007); passwords are the default.
+const (
+	FirstFactorPassword = "password" // a password credential
+	FirstFactorCode     = "code"     // a One-Time Code to a verification address
+)
+
 // Config is the tenant's policy configuration, stored as JSON on the
 // tenant row. Zero values mean defaults.
 type Config struct {
@@ -44,6 +51,9 @@ type Config struct {
 	SMSDailyCap int `json:"sms_daily_cap,omitempty"`
 	// MFA is the second-factor policy: off, optional (default), required.
 	MFA string `json:"mfa,omitempty"`
+	// FirstFactor lists the accepted first factors: "password",
+	// "code", or both. Empty means ["password"] (ADR 0007).
+	FirstFactor []string `json:"first_factor,omitempty"`
 	// UI names the tenant's own screens; Browser Flows drive HTML
 	// clients there by redirect (ADR 0006).
 	UI UIConfig `json:"ui,omitempty"`
@@ -131,6 +141,26 @@ func (c Config) EffectiveMFA() string {
 		return MFAOptional
 	}
 	return c.MFA
+}
+
+// EffectiveFirstFactor is the accepted first factors, defaulting to
+// passwords alone so a tenant that never configured this is untouched.
+func (c Config) EffectiveFirstFactor() []string {
+	if len(c.FirstFactor) == 0 {
+		return []string{FirstFactorPassword}
+	}
+	return c.FirstFactor
+}
+
+// AllowsFirstFactor reports whether a first-factor method may open a
+// session for this tenant.
+func (c Config) AllowsFirstFactor(method string) bool {
+	for _, m := range c.EffectiveFirstFactor() {
+		if m == method {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultSMSDailyCap applies when a tenant configures no cap.

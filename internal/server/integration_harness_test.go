@@ -102,6 +102,7 @@ func newHarness(t *testing.T, referenceUI bool) *harness {
 		pool: testPool,
 		ip:   nextTestIP(),
 	}
+	clearIPBudget(testPool, h.ip)
 	h.public = httptest.NewServer(NewPublic(testPool, resolver, stubBreachChecker{}, ratelimit.New(testPool), providers, referenceUI, log))
 	h.admin = httptest.NewServer(NewAdmin(testPool, testRootKey, testBaseDomain, providers))
 	t.Cleanup(h.public.Close)
@@ -125,6 +126,20 @@ var (
 func nextTestIP() string {
 	n := atomic.AddInt64(&ipSeq, 1)
 	return fmt.Sprintf("198.51.%d.%d", (n/250)%250, n%250+1)
+}
+
+// clearIPBudget hands back the endpoint budgets keyed to one client IP.
+// Those counters live in the database and outlive the process, while the
+// addresses here restart from the same sequence every run — so without
+// this, a run inside a limit window inherits the previous run's spending,
+// and a test that deliberately spends a whole budget finds it already
+// spent. Called wherever an address is handed out, never mid-test: the
+// spending within a test is the thing under test.
+func clearIPBudget(pool *pgxpool.Pool, ip string) {
+	if pool == nil {
+		return
+	}
+	_, _ = pool.Exec(context.Background(), `DELETE FROM rate_limits WHERE key LIKE $1`, "%:"+ip)
 }
 
 // testTenant is a Tenant created for one test. Tenants are fully isolated
@@ -241,8 +256,10 @@ func (h *harness) browser(t *testing.T, tn *testTenant) *browser {
 	}
 }
 
-// withIP gives this browser its own rate-limit budget.
+// withIP gives this browser its own rate-limit budget — a full one, even
+// if an earlier run already spent something against this address.
 func (b *browser) withIP(ip string) *browser {
+	clearIPBudget(b.h.pool, ip)
 	clone := *b
 	clone.ip = ip
 	return &clone

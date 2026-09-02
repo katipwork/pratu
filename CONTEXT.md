@@ -25,11 +25,11 @@ Server-side proof that an identity authenticated, referenced by an HTTP-only coo
 _Avoid_: Login token, auth token
 
 **One-Time Code**:
-A short-lived numeric code delivered to an address (email or phone) to prove control of it — used for recovery, verification, and SMS second-factor login. Never a clickable magic link.
+A short-lived numeric code delivered to an address (email or phone) to prove control of it — used for recovery, verification, SMS second-factor login, and (for tenants that opt in) passwordless first-factor login. Never a clickable magic link.
 _Avoid_: Magic link, OTP link
 
 **Second Factor**:
-An additional proof (TOTP or SMS One-Time Code) required to raise a session from aal1 to aal2. Passwords are the only first factor in v1.
+An additional proof (TOTP or SMS One-Time Code) required to raise a session from aal1 to aal2. First factors are passwords and, where a tenant opts in via `first_factor`, One-Time Codes to an address (ADR 0007); a code-only login is still aal1.
 _Avoid_: 2FA method, MFA device
 
 **Login/Consent Challenge**:

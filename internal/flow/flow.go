@@ -87,11 +87,19 @@ type RecoveryContext struct {
 	FactorAttempts int    `json:"factor_attempts,omitempty"`
 }
 
-// LoginContext appears on a login flow once the password is proven but a
-// second factor is still owed.
+// LoginContext appears on a login flow once the first factor is proven
+// but a second factor is still owed, and on a flow waiting for a
+// first-factor One-Time Code (ADR 0007).
 type LoginContext struct {
-	IdentityID     string `json:"identity_id"`
-	PasswordOK     bool   `json:"password_ok"`
+	IdentityID string `json:"identity_id"`
+	// PasswordOK reports that the first factor is proven — a password,
+	// or a first-factor One-Time Code. Named for the only first factor
+	// that existed when it was introduced.
+	PasswordOK bool `json:"password_ok"`
+	// AddressID is the Address a first-factor One-Time Code was sent to;
+	// proving that code proves the Address. Empty until the code is sent,
+	// and on a flow that never used one.
+	AddressID      string `json:"address_id,omitempty"`
 	FactorAttempts int    `json:"factor_attempts,omitempty"`
 }
 
