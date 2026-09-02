@@ -95,18 +95,15 @@ func (a *publicAPI) createFlowHandler(kind flow.Kind, browser bool) http.Handler
 					return err
 				}
 				flowContext = flow.RegistrationContext{SchemaID: schema.ID}
-				fields := append([]identity.Field(nil), schema.Fields()...)
-				resp.UI.Fields = append(fields,
-					identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
+				resp.UI.Fields = registrationFields(t, schema)
+				resp.UI.Methods = firstFactorMethods(t)
 			case flow.KindRecovery:
 				resp.UI.Fields = []identity.Field{
 					{Name: "address", Type: "text", Title: "Recovery address", Required: true},
 				}
 			default:
-				resp.UI.Fields = []identity.Field{
-					{Name: "identifier", Type: "text", Title: "Email", Required: true},
-					{Name: "password", Type: "password", Title: "Password", Required: true},
-				}
+				resp.UI.Fields = loginFields(t)
+				resp.UI.Methods = firstFactorMethods(t)
 			}
 			f, err := storage.CreateFlowWith(r.Context(), tx, t.ID, kind, flowContext, browser,
 				storage.FlowOptions{
@@ -163,19 +160,24 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 	if !readSubmission(w, r, &body) {
 		return
 	}
-	if body.Method != "password" {
+	if !t.Config.AllowsFirstFactor(body.Method) {
 		a.failSubmission(w, r, t, flow.KindRegistration, flowID,
-			http.StatusBadRequest, "unsupported method; use \"password\"")
+			http.StatusBadRequest, unsupportedFirstFactor(t))
 		return
 	}
-	if !a.validatePassword(w, r, t, flow.KindRegistration, flowID, body.Password) {
-		return
-	}
-
-	hash, err := argon2id.CreateHash(body.Password, argon2id.DefaultParams)
-	if err != nil {
-		internalError(w, err)
-		return
+	// A code registration writes no password credential: the Address it
+	// must prove is the whole credential (ADR 0007).
+	codeOnly := body.Method == tenant.FirstFactorCode
+	var hash string
+	if !codeOnly {
+		if !a.validatePassword(w, r, t, flow.KindRegistration, flowID, body.Password) {
+			return
+		}
+		var err error
+		if hash, err = argon2id.CreateHash(body.Password, argon2id.DefaultParams); err != nil {
+			internalError(w, err)
+			return
+		}
 	}
 
 	var (
@@ -187,7 +189,7 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		browser     bool
 		returnTo    string
 	)
-	err = storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
+	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindRegistration)
 		if err != nil {
 			return err
@@ -221,6 +223,13 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 		if len(identifiers) == 0 {
 			return validationError{[]string{"traits contain no login identifier"}}
 		}
+		// Without a password, the only way back in is a code to an Address
+		// the person can name at the login screen — so one identifier must
+		// itself be a verification address, or this identity is unusable.
+		if codeOnly && !identifiesAVerificationAddress(schema, body.Traits, identifiers) {
+			return validationError{[]string{
+				"traits contain no verifiable address usable as a login identifier"}}
+		}
 		ident, err = storage.CreateIdentity(r.Context(), tx, t.ID, schema.ID, body.Traits, hash, identifiers)
 		if err != nil {
 			return err
@@ -241,7 +250,9 @@ func (a *publicAPI) submitRegistration(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		holdSession = target != nil && t.Config.VerificationRequired()
+		// A code registration always holds the session, even under
+		// "deferred": an unproven Address would leave no credential at all.
+		holdSession = target != nil && (t.Config.VerificationRequired() || codeOnly)
 		if target != nil {
 			verif, err = a.startVerification(r, tx, t, ident.ID, *target, holdSession, f.Browser)
 			if err != nil {
@@ -318,9 +329,16 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 	if !readSubmission(w, r, &body) {
 		return
 	}
-	if body.Method != "password" {
+	// A code login has its own two-step endpoint pair; say so rather than
+	// refusing a method the tenant does in fact accept.
+	if body.Method == tenant.FirstFactorCode && t.Config.AllowsFirstFactor(tenant.FirstFactorCode) {
+		a.failSubmission(w, r, t, flow.KindLogin, flowID, http.StatusBadRequest,
+			`method "code" starts at POST /self-service/login/code/send`)
+		return
+	}
+	if !t.Config.AllowsFirstFactor(tenant.FirstFactorPassword) || body.Method != "password" {
 		a.failSubmission(w, r, t, flow.KindLogin, flowID,
-			http.StatusBadRequest, "unsupported method; use \"password\"")
+			http.StatusBadRequest, unsupportedFirstFactor(t))
 		return
 	}
 	if !a.allow(w, r, "login:ip:"+clientIP(r), limitLoginPerIP, time.Minute) {
@@ -331,21 +349,12 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		sess  *session.Session
-		token string
-		verif *verificationInfo
-	)
-	var mfaRequired, enrollNeeded, browser bool
-	var mfaMethods []string
-	var returnTo string
+	var out loginOutcome
 	err := storage.InTenant(r.Context(), a.pool, t.ID, func(tx pgx.Tx) error {
 		f, err := storage.GetFlow(r.Context(), tx, flowID, flow.KindLogin)
 		if err != nil {
 			return err
 		}
-		browser = f.Browser
-		returnTo = f.ReturnTo
 		if err := flowCSRF(r, f.Browser, f.ID, body.CSRFToken); err != nil {
 			return err
 		}
@@ -366,49 +375,7 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		if !match {
 			return errInvalidCredentials
 		}
-
-		// Correct password, but under the "required" policy an identity
-		// with no verified address gets a fresh code, not a session. Only
-		// runs post-authentication, so it reveals nothing to enumeration.
-		if t.Config.VerificationRequired() {
-			addrs, err := storage.AddressesForIdentity(r.Context(), tx, identityID)
-			if err != nil {
-				return err
-			}
-			if unverified := allUnverified(addrs); unverified != nil {
-				verif, err = a.startVerification(r, tx, t, identityID, *unverified, true, f.Browser)
-				return err
-			}
-		}
-
-		// Second factor: any enrolled factor turns the flow into a held
-		// mfa_required state instead of a session.
-		if t.Config.EffectiveMFA() != tenant.MFAOff {
-			methods, err := enrolledFactors(r.Context(), tx, identityID)
-			if err != nil {
-				return err
-			}
-			if len(methods) > 0 {
-				mfaRequired = true
-				mfaMethods = methods
-				if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
-					IdentityID: identityID,
-					PasswordOK: true,
-				}); err != nil {
-					return err
-				}
-				// The flow stays open on its second-factor step, so a
-				// redirected browser knows which screen to render.
-				return storage.SetFlowUI(r.Context(), tx, f.ID, flow.StateMFARequired, nil)
-			}
-			enrollNeeded = t.Config.EffectiveMFA() == tenant.MFARequired
-		}
-
-		if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
-			return err
-		}
-		sess, token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID, session.AAL1, deviceFrom(r))
-		return err
+		return a.completeFirstFactor(r, tx, t, f, identityID, &out)
 	})
 	if err != nil {
 		var rl errRateLimited
@@ -431,45 +398,133 @@ func (a *publicAPI) submitLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if verif != nil {
-		if browser && a.redirectToScreen(w, r, t, flow.KindVerification, verif.FlowID) {
+	a.respondLogin(w, r, t, flowID, &out)
+}
+
+// loginOutcome is what a proven first factor resolves to: a session, a
+// second factor held on the same flow, or a verification detour. Both
+// first factors (password and One-Time Code) resolve through it, so the
+// two paths cannot drift apart.
+type loginOutcome struct {
+	sess         *session.Session
+	token        string
+	verif        *verificationInfo
+	mfaRequired  bool
+	mfaMethods   []string
+	enrollNeeded bool
+	browser      bool
+	returnTo     string
+}
+
+// completeFirstFactor turns a proven first factor into an outcome, inside
+// the caller's tenant transaction. It runs only post-authentication, so
+// nothing it does reveals anything to enumeration.
+func (a *publicAPI) completeFirstFactor(r *http.Request, tx pgx.Tx, t *tenant.Tenant,
+	f *flow.Flow, identityID string, out *loginOutcome) error {
+
+	out.browser = f.Browser
+	out.returnTo = f.ReturnTo
+
+	// Under the "required" policy an identity with no verified address
+	// gets a fresh code, not a session. A first-factor One-Time Code has
+	// already verified the address it proved, so this cannot fire for it.
+	if t.Config.VerificationRequired() {
+		addrs, err := storage.AddressesForIdentity(r.Context(), tx, identityID)
+		if err != nil {
+			return err
+		}
+		if unverified := allUnverified(addrs); unverified != nil {
+			out.verif, err = a.startVerification(r, tx, t, identityID, *unverified, true, f.Browser)
+			return err
+		}
+	}
+
+	// Second factor: any enrolled factor turns the flow into a held
+	// mfa_required state instead of a session.
+	if t.Config.EffectiveMFA() != tenant.MFAOff {
+		methods, err := enrolledFactors(r.Context(), tx, identityID)
+		if err != nil {
+			return err
+		}
+		if len(methods) > 0 {
+			out.mfaRequired = true
+			out.mfaMethods = methods
+			if err := storage.UpdateFlowContext(r.Context(), tx, f.ID, flow.LoginContext{
+				IdentityID: identityID,
+				PasswordOK: true,
+			}); err != nil {
+				return err
+			}
+			// The flow stays open on its second-factor step, so a
+			// redirected browser knows which screen to render.
+			return storage.SetFlowUI(r.Context(), tx, f.ID, flow.StateMFARequired, nil)
+		}
+		out.enrollNeeded = t.Config.EffectiveMFA() == tenant.MFARequired
+	}
+
+	if err := storage.DeleteFlow(r.Context(), tx, f.ID); err != nil {
+		return err
+	}
+	var err error
+	out.sess, out.token, err = storage.CreateSession(r.Context(), tx, t.ID, identityID, session.AAL1, deviceFrom(r))
+	return err
+}
+
+// respondLogin writes the AuthResult of a completed first factor. Every
+// first factor answers through here, so a code login is byte-for-byte a
+// password login.
+func (a *publicAPI) respondLogin(w http.ResponseWriter, r *http.Request, t *tenant.Tenant,
+	flowID string, out *loginOutcome) {
+
+	if out.verif != nil {
+		if out.browser && a.redirectToScreen(w, r, t, flow.KindVerification, out.verif.FlowID) {
 			return
 		}
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"state":        "verification_required",
-			"verification": verif,
+			"verification": out.verif,
 		})
 		return
 	}
-	if mfaRequired {
+	if out.mfaRequired {
 		// The second factor is owed on this same login flow: back to the
 		// login screen, which reads the flow's state to render the step.
-		if browser && a.redirectToScreen(w, r, t, flow.KindLogin, flowID) {
+		if out.browser && a.redirectToScreen(w, r, t, flow.KindLogin, flowID) {
 			return
 		}
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"state":   "mfa_required",
-			"methods": mfaMethods,
+			"methods": out.mfaMethods,
 		})
 		return
 	}
 
 	state := "active"
-	if enrollNeeded {
+	if out.enrollNeeded {
 		state = "mfa_enrollment_required"
 	}
-	resp := map[string]any{"state": state, "session": sess}
-	if browser {
-		setSessionCookie(w, r, token, sess.ExpiresAt)
+	resp := map[string]any{"state": state, "session": out.sess}
+	if out.browser {
+		setSessionCookie(w, r, out.token, out.sess.ExpiresAt)
 		// Enrolment is owed but the session is real; the UI decides what
 		// to do with it, so only a plain success redirects.
-		if !enrollNeeded && a.redirectAfterSuccess(w, r, t, returnTo) {
+		if !out.enrollNeeded && a.redirectAfterSuccess(w, r, t, out.returnTo) {
 			return
 		}
 	} else {
-		resp["session_token"] = token
+		resp["session_token"] = out.token
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// unsupportedFirstFactor names what this tenant will actually accept.
+func unsupportedFirstFactor(t *tenant.Tenant) string {
+	allowed := t.Config.EffectiveFirstFactor()
+	quoted := make([]string, len(allowed))
+	for i, m := range allowed {
+		quoted[i] = `"` + m + `"`
+	}
+	return "unsupported method; use " + strings.Join(quoted, " or ")
 }
 
 // validatePassword enforces the tenant's password policy, answering the
@@ -491,6 +546,60 @@ func (a *publicAPI) validatePassword(w http.ResponseWriter, r *http.Request, t *
 		return false
 	}
 	return true
+}
+
+// loginFields is a login flow's opening step: the identifier, plus a
+// password when the tenant accepts one as a first factor.
+func loginFields(t *tenant.Tenant) []identity.Field {
+	identifier := identity.Field{Name: "identifier", Type: "text", Title: "Email", Required: true}
+	if t.Config.AllowsFirstFactor(tenant.FirstFactorCode) {
+		// The identifier may well be a phone number here.
+		identifier.Title = "Identifier"
+	}
+	fields := []identity.Field{identifier}
+	if t.Config.AllowsFirstFactor(tenant.FirstFactorPassword) {
+		fields = append(fields,
+			identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
+	}
+	return fields
+}
+
+// registrationFields is the schema's traits, plus a password when the
+// tenant accepts one — a code-only tenant must not be asked for one.
+func registrationFields(t *tenant.Tenant, schema *identity.Schema) []identity.Field {
+	fields := append([]identity.Field(nil), schema.Fields()...)
+	if t.Config.AllowsFirstFactor(tenant.FirstFactorPassword) {
+		fields = append(fields,
+			identity.Field{Name: "password", Type: "password", Title: "Password", Required: true})
+	}
+	return fields
+}
+
+// firstFactorMethods advertises what may drive a flow's opening step.
+// Empty for the password-only default, so clients of tenants that never
+// opted in see exactly what they saw before.
+func firstFactorMethods(t *tenant.Tenant) []string {
+	if !t.Config.AllowsFirstFactor(tenant.FirstFactorCode) {
+		return nil
+	}
+	return t.Config.EffectiveFirstFactor()
+}
+
+// identifiesAVerificationAddress reports whether any login identifier is
+// itself a verification-annotated address, which is what a first-factor
+// One-Time Code needs to have somewhere to go.
+func identifiesAVerificationAddress(schema *identity.Schema, traits json.RawMessage, identifiers []string) bool {
+	for _, spec := range schema.Addresses(traits) {
+		if !spec.Verification {
+			continue
+		}
+		for _, idf := range identifiers {
+			if idf == spec.Value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // allUnverified returns the first verification-purpose address when the

@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- Passwordless first factor ([ADR 0007](docs/adr/0007-passwordless-first-factor.md),
+  [#5](https://github.com/katipwork/pratu/issues/5)): a tenant may accept a
+  One-Time Code to a verification-annotated Address as a first factor, so a
+  phone-first product can register and sign people in with no password
+  credential at all. Opt in per tenant with
+  `first_factor: ["password"] | ["code"] | ["password","code"]`; the default
+  stays `["password"]`, so existing tenants are untouched.
+  - New `POST /self-service/login/code/send` (identifier in, uniform
+    `code_sent` out — identically for identifiers that do not exist, and
+    when the delivery caps refuse the send, so it is no enumeration oracle)
+    and `POST /self-service/login/code` (code in, the same AuthResult a
+    password login returns).
+  - `POST /self-service/registration` accepts `method: "code"`, writing no
+    password credential. The session is always withheld until the Address
+    is proven, even under `verification: deferred`.
+  - Proving a login code marks the Address verified; a code-only login is
+    `aal1`, so an enrolled second factor is still owed on top of it.
+  - `ui.fields` omits `password` for tenants that do not accept one, and
+    `ui.methods` advertises a flow's accepted first factors.
+- `PATCH /admin/tenants/{slug}` edits a tenant's name and policy, which
+  previously could only be set at creation. Absent keys are left alone,
+  so one policy can be flipped without resending the rest; a present key
+  replaces its value outright, nested `password` and `ui` blocks
+  included. The patched policy is validated whole and written under a row
+  lock, so a rejected patch changes nothing and concurrent edits queue
+  rather than overwrite. The slug stays immutable.
+
 ## v0.3.1 — 2026-09-02
 
 Security patch. No API change.

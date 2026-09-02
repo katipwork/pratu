@@ -325,7 +325,7 @@ func (a *publicAPI) readFlow(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Flow = *f
 		resp.CSRFToken = csrfToken(csrfSecret(r), f.ID)
-		resp.UI.Fields, resp.UI.Methods, err = flowUI(r.Context(), tx, f)
+		resp.UI.Fields, resp.UI.Methods, err = flowUI(r.Context(), tx, t, f)
 		return err
 	})
 	if errors.Is(err, storage.ErrFlowNotFound) {
@@ -341,7 +341,7 @@ func (a *publicAPI) readFlow(w http.ResponseWriter, r *http.Request) {
 
 // flowUI derives what a flow's screen should render from its kind and
 // the step it waits on.
-func flowUI(ctx context.Context, tx pgx.Tx, f *flow.Flow) ([]identity.Field, []string, error) {
+func flowUI(ctx context.Context, tx pgx.Tx, t *tenant.Tenant, f *flow.Flow) ([]identity.Field, []string, error) {
 	codeField := []identity.Field{{Name: "code", Type: "text", Title: "Code", Required: true}}
 
 	switch f.Kind {
@@ -362,9 +362,7 @@ func flowUI(ctx context.Context, tx pgx.Tx, f *flow.Flow) ([]identity.Field, []s
 		if err != nil {
 			return nil, nil, err
 		}
-		fields := append([]identity.Field(nil), schema.Fields()...)
-		return append(fields,
-			identity.Field{Name: "password", Type: "password", Title: "Password", Required: true}), nil, nil
+		return registrationFields(t, schema), firstFactorMethods(t), nil
 
 	case flow.KindVerification:
 		return codeField, nil, nil
@@ -398,10 +396,12 @@ func flowUI(ctx context.Context, tx pgx.Tx, f *flow.Flow) ([]identity.Field, []s
 			methods, err := enrolledFactors(ctx, tx, fctx.IdentityID)
 			return codeField, methods, err
 		}
-		return []identity.Field{
-			{Name: "identifier", Type: "text", Title: "Email", Required: true},
-			{Name: "password", Type: "password", Title: "Password", Required: true},
-		}, nil, nil
+		// A first-factor One-Time Code is outstanding (ADR 0007); the
+		// screen owes nothing but the code.
+		if f.State == flow.StateCodeRequired {
+			return codeField, nil, nil
+		}
+		return loginFields(t), firstFactorMethods(t), nil
 	}
 	return nil, nil, nil
 }

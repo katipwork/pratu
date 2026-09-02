@@ -83,6 +83,33 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Tenant" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [tenants]
+      summary: Update a tenant's name and policy
+      description: |
+        Absent keys are left alone, so one policy can be flipped without
+        resending (or accidentally wiping) the rest. A key that is present
+        replaces its value outright, nested blocks (`password`, `ui`)
+        included — send the whole block to change one of its fields.
+
+        The patched policy is validated as a whole and applied under a row
+        lock, so a rejected patch changes nothing and concurrent edits
+        queue instead of overwriting each other. The tenant's slug is its
+        identity and cannot be changed.
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantPatch" }
+      responses:
+        "200":
+          description: The updated tenant
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /admin/tenants/{slug}/clients:
     post:
@@ -477,6 +504,16 @@ components:
           type: string
           enum: [off, optional, required]
           description: Default optional
+        first_factor:
+          type: array
+          description: |
+            The accepted first factors (ADR 0007). Default ["password"].
+            Include "code" to let an identity sign in by proving a
+            verification-annotated address with a One-Time Code, with no
+            password credential involved.
+          items:
+            type: string
+            enum: [password, code]
         ui:
           type: object
           description: |
@@ -511,6 +548,36 @@ components:
           format: uri
           deprecated: true
           description: Superseded by ui.default_return_url; still read as a fallback
+    TenantPatch:
+      type: object
+      description: |
+        Every key is optional; only the keys present are changed. Same
+        value shapes and validation as TenantCreate, minus `slug`, which
+        is the tenant's identity and immutable.
+      properties:
+        name: { type: string }
+        verification:
+          type: string
+          enum: [required, deferred]
+        password:
+          type: object
+          properties:
+            min_length: { type: integer, minimum: 8, maximum: 128 }
+            breach_check: { type: boolean }
+        sms_daily_cap: { type: integer }
+        mfa:
+          type: string
+          enum: [off, optional, required]
+        first_factor:
+          type: array
+          items:
+            type: string
+            enum: [password, code]
+        ui:
+          type: object
+          description: Replaced as a whole when present
+        login_url: { type: string, format: uri, deprecated: true }
+        social_return_url: { type: string, format: uri, deprecated: true }
     Tenant:
       type: object
       properties:

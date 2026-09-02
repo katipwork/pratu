@@ -98,6 +98,13 @@ paths:
         tenant password policy. Under the default `required` verification
         policy the session is withheld until the verification flow in the
         response is completed.
+
+        `method: code` registers a passwordless identity (ADR 0007) on a
+        tenant whose `first_factor` includes `code`: no password is sent
+        or stored, one identifier must itself be a verification-annotated
+        address, and the session is always withheld until that address is
+        proven — even under `verification: deferred`, since an unproven
+        address would leave no credential at all.
       parameters: [{ $ref: "#/components/parameters/flowId" }]
       requestBody:
         required: true
@@ -105,11 +112,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [method, traits, password]
+              required: [method, traits]
               properties:
-                method: { type: string, enum: [password] }
+                method: { type: string, enum: [password, code] }
                 traits: { type: object }
-                password: { type: string }
+                password:
+                  type: string
+                  description: "Required for `method: password`; must be absent for `method: code`"
                 csrf_token: { type: string }
       responses:
         "200":
@@ -146,8 +155,10 @@ paths:
       summary: Read a browser flow
       description: |
         What the tenant's screen renders after a redirect: the step the
-        flow waits on (`state`), the fields to show, the second-factor
-        methods available, and the messages from the last submission.
+        flow waits on (`state`), the fields to show, the methods available
+        (the tenant's first factors on an opening step, the enrolled
+        second factors on a held one), and the messages from the last
+        submission.
         Readable only by the browser that created the flow (its CSRF
         cookie must match); API flows are not exposed here.
       parameters:
@@ -169,6 +180,9 @@ paths:
         (with a spawned verification flow) or `state: mfa_required` (with
         the enrolled methods); complete the latter via
         `/self-service/login/totp` or `/self-service/login/sms`.
+
+        Refused when the tenant's `first_factor` excludes `password`; the
+        flow's `ui.methods` advertises what it accepts.
       parameters: [{ $ref: "#/components/parameters/flowId" }]
       requestBody:
         required: true
@@ -192,6 +206,68 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
         "403":
           description: Verification or a second factor is still required
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HeldLogin" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/code/send:
+    post:
+      tags: [login]
+      summary: Send a first-factor One-Time Code to an address
+      description: |
+        Passwordless first factor (ADR 0007), for tenants whose
+        `first_factor` includes `code`. The identifier must itself be a
+        verification-annotated address; the code goes there over its own
+        channel.
+
+        The answer is uniform whether or not the identifier exists — and
+        whether or not the send was refused by the delivery caps — so this
+        endpoint is no oracle for who is registered. Doubles as resend.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier]
+              properties:
+                identifier: { type: string }
+                csrf_token: { type: string }
+      responses:
+        "200":
+          description: Uniform acknowledgment, said identically for an unknown identifier
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string, enum: [code_sent] }
+                  message: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /self-service/login/code:
+    post:
+      tags: [login]
+      summary: Complete a login with the first-factor One-Time Code
+      description: |
+        Proving the code proves the address, which is marked verified.
+        The result is an `aal1` session in the same shape a password login
+        returns — including the `mfa_required` held state when the
+        identity has a second factor enrolled.
+      parameters: [{ $ref: "#/components/parameters/flowId" }]
+      requestBody: { $ref: "#/components/requestBodies/Code" }
+      responses:
+        "200":
+          description: Session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403":
+          description: A second factor is still required
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HeldLogin" }

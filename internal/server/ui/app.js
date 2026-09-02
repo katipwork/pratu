@@ -70,25 +70,50 @@ function onSubmit(id, fn) {
 async function loginScreen(notice, existing) {
   const flow = existing || (await api("GET", "/self-service/login/browser")).body;
   const social = (await api("GET", "/self-service/social")).body || [];
+  // The tenant's first factors decide the form: ui.fields carries a
+  // password only when one is accepted, ui.methods advertises the rest.
+  const fields = (flow.ui && flow.ui.fields) || [];
+  const methods = (flow.ui && flow.ui.methods) || [];
+  const withPassword = fields.some((f) => f.name === "password");
+  const withCode = methods.includes("code");
+  const idField = fields.find((f) => f.name === "identifier") || {};
   screen("Sign in", `
     <form id="f">
-      <div><label for="identifier">Email</label>
+      <div><label for="identifier">${esc(idField.title || "Email")}</label>
         <input id="identifier" name="identifier" autocomplete="username" required></div>
-      <div><label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required></div>
-      <button>Sign in</button>
+      ${withPassword ? `<div><label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required></div>` : ""}
+      <button>${withPassword ? "Sign in" : "Send me a code"}</button>
+      ${withPassword && withCode ? `<button class="secondary" type="button" id="use-code">Send me a code instead</button>` : ""}
     </form>
     ${social.length ? `<div class="divider">or</div><div class="stack">` +
       social.map((p) => `<button class="secondary" data-social="${esc(p.id)}">Continue with ${esc(p.label)}</button>`).join("") +
       `</div>` : ""}
-    <div class="links"><a href="#" id="to-register">Create account</a><a href="#" id="to-recovery">Forgot password?</a></div>`);
+    <div class="links"><a href="#" id="to-register">Create account</a>${
+      withPassword ? `<a href="#" id="to-recovery">Forgot password?</a>` : "<span></span>"}</div>`);
   if (notice) say(notice.kind, notice.text);
   else showMessages(flow);
   document.getElementById("to-register").onclick = (e) => { e.preventDefault(); registerScreen(); };
-  document.getElementById("to-recovery").onclick = (e) => { e.preventDefault(); recoveryScreen(); };
+  const recoveryLink = document.getElementById("to-recovery");
+  if (recoveryLink) recoveryLink.onclick = (e) => { e.preventDefault(); recoveryScreen(); };
   app.querySelectorAll("[data-social]").forEach((b) =>
     (b.onclick = () => (location.href = `/self-service/social/${b.dataset.social}/browser`)));
+
+  // sendCode asks for a first-factor One-Time Code. Its answer is the
+  // same whether or not the identifier exists, so the next screen is
+  // always the code screen.
+  const sendCode = async (identifier) => {
+    if (!identifier) return say("error", "Enter your " + (idField.title || "email").toLowerCase() + " first.");
+    const r = await api("POST", `/self-service/login/code/send?flow=${flow.id}`, {
+      identifier, csrf_token: flow.csrf_token,
+    });
+    r.ok ? loginCodeScreen(flow.id, flow.csrf_token, r.body && r.body.message) : say("error", errOf(r));
+  };
+  const codeButton = document.getElementById("use-code");
+  if (codeButton) codeButton.onclick = () => sendCode(document.getElementById("identifier").value);
+
   onSubmit("f", async (fd) => {
+    if (!withPassword) return sendCode(fd.get("identifier"));
     const resp = await api("POST", `/self-service/login?flow=${flow.id}`, {
       method: "password", identifier: fd.get("identifier"),
       password: fd.get("password"), csrf_token: flow.csrf_token,
@@ -101,6 +126,30 @@ async function loginScreen(notice, existing) {
   });
 }
 
+// loginCodeScreen takes the first-factor One-Time Code. Success is a
+// session, or the second factor owed on the same flow.
+function loginCodeScreen(flowId, csrf, notice) {
+  screen("Enter your code", `
+    <p class="muted">${esc(notice || "If the identifier exists, a code was sent to it.")}</p>
+    <form id="f">
+      <div><label for="code">Code</label>
+        <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required></div>
+      <button>Sign in</button>
+    </form>
+    <div class="links"><a href="#" id="to-login">Back to sign in</a><span></span></div>`);
+  document.getElementById("to-login").onclick = (e) => { e.preventDefault(); loginScreen(); };
+  onSubmit("f", async (fd) => {
+    const r = await api("POST", `/self-service/login/code?flow=${flowId}`, {
+      code: fd.get("code"), csrf_token: csrf,
+    });
+    if (r.ok) return afterAuth();
+    if (r.status === 403 && r.body && r.body.state === "mfa_required") {
+      return mfaScreen(flowId, csrf, r.body.methods);
+    }
+    say("error", errOf(r));
+  });
+}
+
 async function registerScreen(existing) {
   let flow = existing;
   if (!flow) {
@@ -109,12 +158,15 @@ async function registerScreen(existing) {
     flow = resp.body;
   }
   const traits = flow.ui.fields.filter((f) => f.name !== "password");
+  // A tenant that accepts no password never asks for one: the address
+  // the code proves is the whole credential.
+  const withPassword = flow.ui.fields.some((f) => f.name === "password");
   screen("Create account", `
     <form id="f">
       ${traits.map((f) => `<div><label for="t-${esc(f.name)}">${esc(f.title || f.name)}</label>
         <input id="t-${esc(f.name)}" name="${esc(f.name)}" ${f.name === "email" ? 'type="email" autocomplete="email"' : ""} ${f.required ? "required" : ""}></div>`).join("")}
-      <div><label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="new-password" required></div>
+      ${withPassword ? `<div><label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required></div>` : ""}
       <button>Create account</button>
     </form>
     <div class="links"><a href="#" id="to-login">Back to sign in</a><span></span></div>`);
@@ -123,8 +175,10 @@ async function registerScreen(existing) {
   onSubmit("f", async (fd) => {
     const t = {};
     traits.forEach((f) => { const v = fd.get(f.name); if (v) t[f.name] = v; });
-    const r = await api("POST", `/self-service/registration?flow=${flow.id}`, {
+    const r = await api("POST", `/self-service/registration?flow=${flow.id}`, withPassword ? {
       method: "password", traits: t, password: fd.get("password"), csrf_token: flow.csrf_token,
+    } : {
+      method: "code", traits: t, csrf_token: flow.csrf_token,
     });
     if (!r.ok) return say("error", errOf(r));
     if (r.body.state === "verification_required") return verifyScreen(r.body.verification);
@@ -349,6 +403,7 @@ async function renderFlow(id, notice) {
       return recoveryScreen(f);
     case "login":
       if (f.state === "mfa_required") return mfaScreen(f.id, f.csrf_token, methods);
+      if (f.state === "code_required") return loginCodeScreen(f.id, f.csrf_token);
       return loginScreen(notice, f);
   }
   return loginScreen(notice);

@@ -97,6 +97,33 @@ func FindRecoveryAddress(ctx context.Context, tx pgx.Tx, value string) (*identit
 	return &a, identityID, nil
 }
 
+// FindLoginCodeAddress resolves a submitted login identifier to the
+// verification-capable address that *is* that identifier, plus its
+// identity — the target of a first-factor One-Time Code (ADR 0007).
+// Requiring the address to equal the identifier keeps the code going
+// where the person just typed, never to some other address they own.
+// Absence is normal (the send step must not reveal it); callers get
+// ErrNoCredential.
+func FindLoginCodeAddress(ctx context.Context, tx pgx.Tx, identifier string) (*identity.Address, string, error) {
+	var identityID string
+	var a identity.Address
+	err := tx.QueryRow(ctx,
+		`SELECT a.id::text, a.channel, a.value, a.verified, a.verified_at,
+		        a.for_verification, a.for_recovery, a.identity_id::text
+		   FROM identity_addresses a
+		   JOIN identity_identifiers ii ON ii.identity_id = a.identity_id
+		  WHERE ii.identifier = $1 AND a.value = $1 AND a.for_verification
+		  ORDER BY a.created_at DESC LIMIT 1`, identifier,
+	).Scan(&a.ID, &a.Channel, &a.Value, &a.Verified, &a.VerifiedAt, &a.ForVerification, &a.ForRecovery, &identityID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", ErrNoCredential
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return &a, identityID, nil
+}
+
 // MarkAddressVerified records a successful verification.
 func MarkAddressVerified(ctx context.Context, tx pgx.Tx, id string) error {
 	_, err := tx.Exec(ctx,
