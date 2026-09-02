@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Dependency upgrades clearing the open Dependabot alerts, none reachable
+  from this code (`govulncheck` reports nothing before or after):
+  `google.golang.org/grpc` 1.82.1 → 1.83.1 (CVE-2026-84304, an HTTP/2
+  server-side OOM — this binary runs no gRPC server),
+  `github.com/gorilla/websocket` 1.5.0 → 1.5.3 (GHSA-w67g-5rqw-f597, weak
+  PRNG for mask keys — no WebSocket endpoints here), and the OTLP trace
+  exporter stack 1.21.0 → 1.43.0 (CVE-2026-39882, unbounded response-body
+  reads from the operator-configured collector). All three are indirect
+  dependencies pulled in through fosite; upgraded to keep the tree clean.
+
 ## v0.4.0 — 2026-09-02
 
 - Passwordless first factor ([ADR 0007](docs/adr/0007-passwordless-first-factor.md),
