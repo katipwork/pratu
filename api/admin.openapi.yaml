@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Pratu Admin API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     The platform management plane. Runs on its own listener (`:4434` by
     default) and must never be reachable through tenant hostnames or the

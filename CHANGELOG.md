@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — 2026-09-04
 
 - Capability-limited admin keys ([ADR 0009](docs/adr/0009-capability-limited-admin-keys.md),
   [#10](https://github.com/katipwork/pratu/issues/10)): besides the
