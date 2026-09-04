@@ -7,11 +7,15 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"time"
 )
 
 var (
 	ErrNotFound  = errors.New("tenant not found")
 	ErrSlugTaken = errors.New("tenant slug already in use")
+	// ErrNotDisabled refuses to destroy a tenant that is still switched
+	// on: a purge is reachable only from the disabled state (ADR 0008).
+	ErrNotDisabled = errors.New("tenant is not disabled")
 )
 
 type Tenant struct {
@@ -19,7 +23,14 @@ type Tenant struct {
 	Slug   string `json:"slug"`
 	Name   string `json:"name"`
 	Config Config `json:"config"`
+	// DisabledAt is when the tenant was switched off, nil while it is
+	// live. A disabled tenant keeps everything it owns — and its slug —
+	// but resolves from no hostname, so its public surface is closed
+	// until an operator enables it again (ADR 0008).
+	DisabledAt *time.Time `json:"disabled_at,omitempty"`
 }
+
+func (t *Tenant) Disabled() bool { return t.DisabledAt != nil }
 
 // Verification policy values.
 const (
@@ -57,6 +68,9 @@ type Config struct {
 	// UI names the tenant's own screens; Browser Flows drive HTML
 	// clients there by redirect (ADR 0006).
 	UI UIConfig `json:"ui,omitempty"`
+	// LoginThrottle bounds login attempts per identifier. Zero values
+	// mean the defaults.
+	LoginThrottle LoginThrottleConfig `json:"login_throttle,omitempty"`
 	// LoginURL is the tenant's own login UI; OAuth2 authorization
 	// requests redirect there with a login_challenge (Hydra-style).
 	//
@@ -163,6 +177,43 @@ func (c Config) AllowsFirstFactor(method string) bool {
 	return false
 }
 
+// The per-identifier login throttle a tenant gets when it configures
+// none: strict, because it is brute-force protection.
+const (
+	DefaultLoginMaxAttempts = 5
+	DefaultLoginWindow      = time.Minute
+)
+
+// LoginThrottleConfig bounds how often one identifier may attempt to log
+// in. It is per tenant because the right answer differs by environment:
+// a production tenant wants the strict default, while a test tenant
+// whose suite signs the same handful of identities in over and over
+// needs room to do so, and would otherwise fail on the throttle rather
+// than on anything it asserts. Zero values mean the defaults.
+//
+// This is deliberately a knob that can weaken brute-force protection.
+// Only an operator holding the admin key can turn it, and it reaches
+// one tenant at a time; the per-IP login limit is platform-wide and not
+// configurable here.
+type LoginThrottleConfig struct {
+	MaxAttempts   int `json:"max_attempts,omitempty"`
+	WindowSeconds int `json:"window_seconds,omitempty"`
+}
+
+func (l LoginThrottleConfig) EffectiveMaxAttempts() int {
+	if l.MaxAttempts > 0 {
+		return l.MaxAttempts
+	}
+	return DefaultLoginMaxAttempts
+}
+
+func (l LoginThrottleConfig) EffectiveWindow() time.Duration {
+	if l.WindowSeconds > 0 {
+		return time.Duration(l.WindowSeconds) * time.Second
+	}
+	return DefaultLoginWindow
+}
+
 // DefaultSMSDailyCap applies when a tenant configures no cap.
 const DefaultSMSDailyCap = 1000
 
@@ -189,7 +240,11 @@ func (p PasswordConfig) BreachCheckEnabled() bool {
 	return p.BreachCheck == nil || *p.BreachCheck
 }
 
-// Store loads tenants from persistent storage.
+// Store loads tenants from persistent storage. It is the Resolver's view
+// and therefore the public one: implementations must not return disabled
+// tenants, so a closed tenant cannot be served even by a handler that
+// forgets to ask (ADR 0008). The admin API reaches disabled tenants
+// through its own, explicitly-named lookup.
 type Store interface {
 	FindBySlug(ctx context.Context, slug string) (*Tenant, error)
 	FindByDomain(ctx context.Context, domain string) (*Tenant, error)

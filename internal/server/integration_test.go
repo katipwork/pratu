@@ -11,6 +11,7 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/katipwork/pratu/internal/flow"
+	"github.com/katipwork/pratu/internal/tenant"
 )
 
 // The Browser Flow contract, end to end (ADR 0006): HTML clients are
@@ -314,9 +315,10 @@ func TestRateLimitedRedirect(t *testing.T) {
 		})
 	}
 
-	// limitLoginPerID attempts pass (each a plain failure), the next is
-	// refused outright.
-	for i := 0; i < limitLoginPerID; i++ {
+	// The tenant configures no throttle, so the default budget applies:
+	// that many attempts pass (each a plain failure), the next is refused
+	// outright.
+	for i := 0; i < tenant.DefaultLoginMaxAttempts; i++ {
 		if r := submit(); r.Location == errorScreen+"?code="+errCodeRateLimited {
 			t.Fatalf("attempt %d was rate limited before the budget was spent", i+1)
 		}

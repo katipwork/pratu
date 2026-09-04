@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/katipwork/pratu/internal/adminkey"
 	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/ratelimit"
 	"github.com/katipwork/pratu/internal/storage"
@@ -77,7 +78,10 @@ type harness struct {
 // same handlers, same resolver, same limiter, a stubbed breach checker,
 // and no Courier drain — One-Time Codes are read straight from the
 // outbox instead.
-func newHarness(t *testing.T, referenceUI bool) *harness {
+// newHarness builds the server pair. Extra scoped admin keys are
+// optional, so the tests that do not care about authorization are
+// unaffected by its existence.
+func newHarness(t *testing.T, referenceUI bool, scopedKeys ...adminkey.Key) *harness {
 	t.Helper()
 	if testPool == nil {
 		t.Skip("PRATU_TEST_DATABASE_URL not set")
@@ -103,8 +107,12 @@ func newHarness(t *testing.T, referenceUI bool) *harness {
 		ip:   nextTestIP(),
 	}
 	clearIPBudget(testPool, h.ip)
+	ring, err := adminkey.NewKeyring(testRootKey, scopedKeys)
+	if err != nil {
+		t.Fatalf("admin keyring: %v", err)
+	}
 	h.public = httptest.NewServer(NewPublic(testPool, resolver, stubBreachChecker{}, ratelimit.New(testPool), providers, referenceUI, log))
-	h.admin = httptest.NewServer(NewAdmin(testPool, testRootKey, testBaseDomain, providers))
+	h.admin = httptest.NewServer(NewAdmin(testPool, ring, testBaseDomain, providers))
 	t.Cleanup(h.public.Close)
 	t.Cleanup(h.admin.Close)
 	return h
@@ -174,6 +182,13 @@ func (h *harness) createTenant(t *testing.T, cfg map[string]any) *testTenant {
 
 func (h *harness) adminRequest(t *testing.T, method, path string, body any) *resp {
 	t.Helper()
+	return h.adminRequestAs(t, testRootKey, method, path, body)
+}
+
+// adminRequestAs presents a specific admin key, which is how a test
+// drives a capability-limited one.
+func (h *harness) adminRequestAs(t *testing.T, secret, method, path string, body any) *resp {
+	t.Helper()
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -186,7 +201,9 @@ func (h *harness) adminRequest(t *testing.T, method, path string, body any) *res
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+testRootKey)
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

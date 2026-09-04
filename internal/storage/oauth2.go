@@ -226,16 +226,80 @@ func CreateOAuth2Client(ctx context.Context, tx pgx.Tx, tenantID string, c *OAut
 	return err
 }
 
-var ErrClientNotFound = errors.New("oauth2 client not found")
+var (
+	ErrClientNotFound = errors.New("oauth2 client not found")
+	ErrClientPublic   = errors.New("oauth2 client is public and has no secret")
+)
+
+// RotateOAuth2ClientSecret replaces a confidential client's secret hash
+// and leaves its id alone, so a lost or leaked secret is recoverable
+// without churning the client_id every consumer is configured with. The
+// row is locked for the update, so concurrent rotations serialise rather
+// than interleave read and write.
+func RotateOAuth2ClientSecret(ctx context.Context, tx pgx.Tx, id, secretHash string) error {
+	c, err := findOAuth2Client(ctx, tx, id, forUpdate)
+	if err != nil {
+		return err
+	}
+	if c.Public {
+		return ErrClientPublic
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE oauth2_clients SET secret_hash = $2 WHERE id = $1`, id, secretHash)
+	return err
+}
+
+// UpdateOAuth2Client applies mutate to a locked client row and writes the
+// result back. Only the editable metadata is written: the client's id,
+// secret and public-ness survive whatever mutate does, so an edit can
+// never re-identify a client or silently change how it authenticates.
+// first_party is likewise fixed — flipping it would change whether the
+// consent step is skipped, which is a decision to make at creation.
+func UpdateOAuth2Client(ctx context.Context, tx pgx.Tx, id string, mutate func(*OAuth2Client) error) (*OAuth2Client, error) {
+	c, err := findOAuth2Client(ctx, tx, id, forUpdate)
+	if err != nil {
+		return nil, err
+	}
+	if err := mutate(c); err != nil {
+		return nil, err
+	}
+	uris, err := json.Marshal(c.RedirectURIs)
+	if err != nil {
+		return nil, err
+	}
+	scopes, err := json.Marshal(c.Scopes)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE oauth2_clients SET name = $2, redirect_uris = $3, scopes = $4 WHERE id = $1`,
+		id, c.Name, uris, scopes)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// forUpdate locks the client row for the rest of the transaction, so a
+// read-modify-write serialises against a concurrent one instead of
+// interleaving.
+const forUpdate = true
 
 func FindOAuth2Client(ctx context.Context, tx pgx.Tx, id string) (*OAuth2Client, error) {
+	return findOAuth2Client(ctx, tx, id, false)
+}
+
+func findOAuth2Client(ctx context.Context, tx pgx.Tx, id string, lock bool) (*OAuth2Client, error) {
+	q := `SELECT id, name, secret_hash, redirect_uris, scopes, first_party
+		   FROM oauth2_clients WHERE id = $1`
+	if lock {
+		q += ` FOR UPDATE`
+	}
 	var c OAuth2Client
 	var secret *string
 	var uris, scopes []byte
-	err := tx.QueryRow(ctx,
-		`SELECT id, name, secret_hash, redirect_uris, scopes, first_party
-		   FROM oauth2_clients WHERE id = $1`, id,
-	).Scan(&c.ID, &c.Name, &secret, &uris, &scopes, &c.FirstParty)
+	err := tx.QueryRow(ctx, q, id).
+		Scan(&c.ID, &c.Name, &secret, &uris, &scopes, &c.FirstParty)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrClientNotFound
 	}

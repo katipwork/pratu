@@ -18,7 +18,6 @@ import (
 const (
 	limitFlowCreatePerIP = 30 // per minute
 	limitLoginPerIP      = 30 // per minute
-	limitLoginPerID      = 5  // per minute, per identifier
 	limitRegisterPerIP   = 20 // per hour
 	limitVerifyPerIP     = 30 // per minute
 	limitResendPerIP     = 10 // per minute
@@ -67,6 +66,21 @@ func (a *publicAPI) allow(w http.ResponseWriter, r *http.Request, key string, li
 	return true
 }
 
+// allowLoginAttempt enforces the per-identifier login throttle, the one
+// limit a tenant configures for itself: the default is strict because it
+// is brute-force protection, but a test tenant signing the same few
+// identities in repeatedly can be given room (#11). The per-IP limit
+// above is platform-wide and stays put — its key is not tenant-scoped,
+// because attackers spread across tenants.
+//
+// The identifier must already be normalised; it is the caller's, and the
+// key is built here so the two call sites cannot drift apart.
+func (a *publicAPI) allowLoginAttempt(w http.ResponseWriter, r *http.Request, t *tenant.Tenant, identifier string) bool {
+	throttle := t.Config.LoginThrottle
+	return a.allow(w, r, fmt.Sprintf("login:id:%s:%s", t.ID, identifier),
+		throttle.EffectiveMaxAttempts(), throttle.EffectiveWindow())
+}
+
 // allowSend enforces the delivery caps for one address. Called inside
 // tenant transactions; returns errRateLimited to unwind them.
 func (a *publicAPI) allowSend(ctx context.Context, t *tenant.Tenant, channel, value string) error {
@@ -102,7 +116,11 @@ func (a *publicAPI) allowSend(ctx context.Context, t *tenant.Tenant, channel, va
 }
 
 func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
-	if secs := int(retryAfter.Seconds()); secs > 0 {
+	// Round up, never down: truncating a window with 400ms left gave 0,
+	// which dropped the header entirely and left the client to guess —
+	// and told it to retry immediately if it had been sent.
+	if retryAfter > 0 {
+		secs := int((retryAfter + time.Second - 1) / time.Second)
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
 	}
 	writeError(w, http.StatusTooManyRequests, "too many requests; try again later")

@@ -5,8 +5,17 @@ info:
   description: |
     The platform management plane. Runs on its own listener (`:4434` by
     default) and must never be reachable through tenant hostnames or the
-    public internet. Every `/admin/*` request requires the root API key
-    as a bearer token.
+    public internet. Every `/admin/*` request carries an admin key as a
+    bearer token.
+
+    That key is either the root key, which is unrestricted, or one of the
+    configured capability-limited keys, which may perform only the
+    capabilities they were granted and only on the Tenants their slug
+    patterns admit (ADR 0009). Each operation below names the capability
+    it requires; a key that holds a valid secret but not that capability
+    gets `403` naming what it lacks, as against `401` for a key that is
+    not recognised at all. Keys are configured under `admin.keys`, not
+    managed through this API.
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -41,6 +50,7 @@ paths:
 
   /admin/tenants:
     post:
+      x-required-capability: "tenants:create"
       tags: [tenants]
       summary: Create a tenant
       description: |
@@ -61,6 +71,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
     get:
+      x-required-capability: "tenants:read"
       tags: [tenants]
       summary: List tenants
       responses:
@@ -73,6 +84,7 @@ paths:
                 items: { $ref: "#/components/schemas/Tenant" }
   /admin/tenants/{slug}:
     get:
+      x-required-capability: "tenants:read"
       tags: [tenants]
       summary: Fetch one tenant
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -84,6 +96,7 @@ paths:
               schema: { $ref: "#/components/schemas/Tenant" }
         "404": { $ref: "#/components/responses/Error" }
     patch:
+      x-required-capability: "tenants:update"
       tags: [tenants]
       summary: Update a tenant's name and policy
       description: |
@@ -110,9 +123,72 @@ paths:
               schema: { $ref: "#/components/schemas/Tenant" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    delete:
+      x-required-capability: "tenants:disable, plus tenants:purge when ?purge=true"
+      tags: [tenants]
+      summary: Disable a tenant (soft delete)
+      description: |
+        Switches the tenant off: it resolves from no hostname, so its
+        Self-Service Flows, OAuth2 endpoints, JWKS and discovery all stop
+        answering at once. Nothing it owns is destroyed — identities,
+        sessions and clients survive — and its slug stays held, because
+        freeing it would let the hostname come to mean a different
+        identity namespace (ADR 0008). Reopen with `POST .../enable`.
+
+        Idempotent: disabling an already-disabled tenant answers as the
+        first call did, `disabled_at` included, so a compensating saga can
+        run twice. A slug that was never there is a 404.
+
+        Not a revocation primitive: an already-issued access token stays
+        valid until it expires, though a resource server that re-fetches
+        JWKS can no longer reach it.
+
+        `?purge=true` instead destroys the tenant and everything it owns
+        — identities, credentials, sessions, clients, keys — and frees
+        the slug for re-use. Irreversible, and refused with 409 unless
+        the tenant is already disabled: destruction is a deliberate
+        second step, never the meaning of a bare DELETE. A `purge` value
+        that is not a boolean is a 400, so a typo can never be read as
+        the safer verb.
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - name: purge
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: Destroy the tenant instead of disabling it
+      responses:
+        "200":
+          description: |
+            The disabled tenant, carrying `disabled_at`; for a purge,
+            `{ "state": "purged", "slug": "..." }`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/enable:
+    post:
+      x-required-capability: "tenants:disable"
+      tags: [tenants]
+      summary: Re-enable a disabled tenant
+      description: |
+        Reopens the tenant's public surface. Sessions were never revoked,
+        so it comes back whole rather than signed out. Idempotent on a
+        tenant that is already live.
+      parameters: [{ $ref: "#/components/parameters/slug" }]
+      responses:
+        "200":
+          description: The live tenant, with no `disabled_at`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /admin/tenants/{slug}/clients:
     post:
+      x-required-capability: "clients:create"
       tags: [clients]
       summary: Create an OAuth2 client
       description: |
@@ -153,6 +229,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     get:
+      x-required-capability: "clients:read"
       tags: [clients]
       summary: List OAuth2 clients
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -166,7 +243,47 @@ paths:
                 items: { $ref: "#/components/schemas/OAuth2Client" }
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/clients/{id}:
+    patch:
+      x-required-capability: "clients:update"
+      tags: [clients]
+      summary: Edit an OAuth2 client
+      description: |
+        Absent keys are left alone; a present key replaces its value
+        outright. `client_id`, the secret, and `first_party` are not
+        editable — adding a scope or a redirect_uri is a metadata change
+        and must not force every consumer holding the credentials to be
+        updated in lockstep.
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                redirect_uris:
+                  type: array
+                  items: { type: string, format: uri }
+                  description: At least one, absolute and without a fragment
+                scopes:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: The edited client (no secret)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuth2Client" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
     delete:
+      x-required-capability: "clients:delete"
       tags: [clients]
       summary: Delete an OAuth2 client
       parameters:
@@ -178,9 +295,41 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Status" }
         "404": { $ref: "#/components/responses/Error" }
+  /admin/tenants/{slug}/clients/{id}/rotate-secret:
+    post:
+      x-required-capability: "clients:rotate-secret"
+      tags: [clients]
+      summary: Rotate an OAuth2 client secret
+      description: |
+        Mints a fresh secret for a confidential client and returns it —
+        again, the only time it exists in plaintext. The `client_id` is
+        unchanged, so a lost or leaked secret is replaced without
+        re-identifying the client everywhere it is configured. The
+        previous secret stops authenticating immediately. Public clients
+        have no secret and are refused.
+      parameters:
+        - { $ref: "#/components/parameters/slug" }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  state: { type: string }
+                  client_id: { type: string, description: Unchanged }
+                  client_secret: { type: string, description: Shown exactly once }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /admin/tenants/{slug}/schemas:
     get:
+      x-required-capability: "schemas:read"
       tags: [schemas]
       summary: List Identity Schema versions
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -195,6 +344,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/schemas/{name}:
     get:
+      x-required-capability: "schemas:read"
       tags: [schemas]
       summary: Fetch the current version of a named schema
       parameters:
@@ -213,6 +363,7 @@ paths:
                       schema: { type: object }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      x-required-capability: "schemas:write"
       tags: [schemas]
       summary: Publish a new version of a named schema
       description: |
@@ -240,6 +391,7 @@ paths:
 
   /admin/tenants/{slug}/keys:
     get:
+      x-required-capability: "keys:read"
       tags: [keys]
       summary: List signing keys (never private material)
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -254,6 +406,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/keys/rotate:
     post:
+      x-required-capability: "keys:rotate"
       tags: [keys]
       summary: Rotate the signing key
       description: |
@@ -274,6 +427,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/keys/{kid}:
     delete:
+      x-required-capability: "keys:delete"
       tags: [keys]
       summary: Delete a retired key (tokens it signed stop verifying)
       parameters:
@@ -289,6 +443,7 @@ paths:
 
   /admin/tenants/{slug}/social:
     get:
+      x-required-capability: "social:read"
       tags: [social]
       summary: List social providers (no secrets)
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -303,6 +458,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/social/{provider}:
     put:
+      x-required-capability: "social:write"
       tags: [social]
       summary: Create or replace a social provider
       parameters:
@@ -337,6 +493,7 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     delete:
+      x-required-capability: "social:delete"
       tags: [social]
       summary: Delete a social provider
       parameters:
@@ -348,6 +505,7 @@ paths:
 
   /admin/tenants/{slug}/domains:
     get:
+      x-required-capability: "domains:read"
       tags: [domains]
       summary: List the tenant's custom domains
       parameters: [{ $ref: "#/components/parameters/slug" }]
@@ -366,6 +524,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /admin/tenants/{slug}/domains/{domain}:
     put:
+      x-required-capability: "domains:write"
       tags: [domains]
       summary: Claim a custom domain for the tenant
       description: |
@@ -382,6 +541,7 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
     delete:
+      x-required-capability: "domains:delete"
       tags: [domains]
       summary: Release a custom domain
       parameters:
@@ -393,6 +553,7 @@ paths:
 
   /admin/tenants/{slug}/identities/{id}/sessions:
     get:
+      x-required-capability: "sessions:read"
       tags: [sessions]
       summary: List an identity's live sessions
       parameters:
@@ -408,6 +569,7 @@ paths:
                 items: { type: object }
         "404": { $ref: "#/components/responses/Error" }
     delete:
+      x-required-capability: "sessions:revoke"
       tags: [sessions]
       summary: "Kill-switch: revoke every session of an identity"
       parameters:
@@ -430,7 +592,10 @@ components:
     rootKey:
       type: http
       scheme: bearer
-      description: The platform root API key (PRATU_ADMIN_ROOT_KEY)
+      description: |
+        An admin key: the unrestricted root key
+        (`PRATU_ADMIN_ROOT_KEY`), or a capability-limited key configured
+        under `admin.keys` (`PRATU_ADMIN_KEY_<NAME>`).
   parameters:
     slug:
       name: slug
@@ -514,6 +679,7 @@ components:
           items:
             type: string
             enum: [password, code]
+        login_throttle: { $ref: "#/components/schemas/LoginThrottle" }
         ui:
           type: object
           description: |
@@ -573,11 +739,41 @@ components:
           items:
             type: string
             enum: [password, code]
+        login_throttle:
+          allOf:
+            - $ref: "#/components/schemas/LoginThrottle"
+            - description: Replaced as a whole when present
         ui:
           type: object
           description: Replaced as a whole when present
         login_url: { type: string, format: uri, deprecated: true }
         social_return_url: { type: string, format: uri, deprecated: true }
+    LoginThrottle:
+      type: object
+      description: |
+        Bounds login attempts per identifier, per tenant. Omit — or send
+        zeroes — for the strict default of 5 attempts per 60 seconds.
+
+        The knob exists so that a test tenant, whose suite signs the same
+        handful of identities in repeatedly, can be given room without
+        loosening anything for a production tenant. It can therefore
+        weaken brute-force protection: it reaches one tenant at a time
+        and only an operator holding the admin key can turn it. The
+        per-IP login limit is platform-wide and not configurable here.
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+          description: 0 means the default (5)
+        window_seconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+          description: |
+            0 means the default (60). Capped at an hour: a throttle is a
+            short-term control, and a longer window is account lockout —
+            usually written by mistyping seconds as milliseconds.
     Tenant:
       type: object
       properties:
@@ -585,6 +781,13 @@ components:
         slug: { type: string }
         name: { type: string }
         config: { type: object }
+        disabled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            When the tenant was switched off; absent while it is live.
+            A disabled tenant resolves from no hostname.
     OAuth2Client:
       type: object
       properties:

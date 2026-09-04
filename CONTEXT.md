@@ -5,8 +5,8 @@ Pratu (ประตู, Thai for "door") is a headless, multi-tenant authenticat
 ## Language
 
 **Tenant**:
-A customer organisation, owning a fully isolated identity namespace: its identities, Identity Schemas, OAuth2 clients, and configuration belong to exactly one tenant. The same person at two tenants is two unrelated identities.
-_Avoid_: Organization, project, workspace, realm
+A customer organisation, owning a fully isolated identity namespace: its identities, Identity Schemas, OAuth2 clients, and configuration belong to exactly one tenant. The same person at two tenants is two unrelated identities. Removing a tenant means **disabling** it: it then resolves from no hostname and its whole public surface closes, while everything it owns — and its slug — survives until an operator enables it again. Destroying a disabled tenant and freeing its slug is a second, explicit act: **purging** it (ADR 0008).
+_Avoid_: Organization, project, workspace, realm; _deleted_ for a disabled tenant (nothing is destroyed), suspended, archived
 
 **Identity**:
 A person (or service account) known to exactly one tenant. Holds traits, credentials, and addresses.

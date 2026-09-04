@@ -66,12 +66,28 @@ func NewTenantStore(pool *pgxpool.Pool) *TenantStore {
 	return &TenantStore{pool: pool}
 }
 
+// FindBySlug implements tenant.Store, which is public resolution: a
+// disabled tenant is not found, so no hostname can reach it (ADR 0008).
 func (s *TenantStore) FindBySlug(ctx context.Context, slug string) (*tenant.Tenant, error) {
+	return s.findBySlug(ctx, slug, false)
+}
+
+// FindBySlugIncludingDisabled is the operator's view. The admin API must
+// still reach a disabled tenant to inspect it, edit it, or switch it
+// back on — an operator who cannot see what they closed cannot undo it.
+func (s *TenantStore) FindBySlugIncludingDisabled(ctx context.Context, slug string) (*tenant.Tenant, error) {
+	return s.findBySlug(ctx, slug, true)
+}
+
+func (s *TenantStore) findBySlug(ctx context.Context, slug string, includeDisabled bool) (*tenant.Tenant, error) {
+	q := `SELECT id::text, slug, name, config, disabled_at FROM tenants WHERE slug = $1`
+	if !includeDisabled {
+		q += ` AND disabled_at IS NULL`
+	}
 	var t tenant.Tenant
 	var config []byte
-	err := s.pool.QueryRow(ctx,
-		`SELECT id::text, slug, name, config FROM tenants WHERE slug = $1`, slug,
-	).Scan(&t.ID, &t.Slug, &t.Name, &config)
+	err := s.pool.QueryRow(ctx, q, slug).
+		Scan(&t.ID, &t.Slug, &t.Name, &config, &t.DisabledAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tenant.ErrNotFound
 	}

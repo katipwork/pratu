@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/katipwork/pratu/internal/adminkey"
 	"github.com/katipwork/pratu/internal/config"
 	"github.com/katipwork/pratu/internal/courier"
 	"github.com/katipwork/pratu/internal/oauth2"
@@ -136,8 +137,20 @@ func serve(log *slog.Logger, args []string) error {
 	if cfg.Public.ReferenceUI {
 		log.Info("reference login UI enabled at /ui/ on tenant hostnames")
 	}
+	// Config already validated the ring at load, so this cannot fail for
+	// a configuration reason.
+	ring, err := adminkey.NewKeyring(cfg.Admin.RootKey, cfg.Admin.Keys)
+	if err != nil {
+		log.Error("admin keys", "err", err)
+		os.Exit(1)
+	}
+	for _, k := range cfg.Admin.Keys {
+		log.Info("scoped admin key configured", "name", k.Name,
+			"capabilities", k.Capabilities, "tenants", k.Tenants)
+	}
+
 	public := &http.Server{Addr: cfg.Public.Listen, Handler: server.NewPublic(pool, resolver, breach, limiter, providers, cfg.Public.ReferenceUI, log)}
-	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, cfg.Admin.RootKey, cfg.BaseDomain, providers)}
+	admin := &http.Server{Addr: cfg.Admin.Listen, Handler: server.NewAdmin(pool, ring, cfg.BaseDomain, providers)}
 
 	errc := make(chan error, 2)
 	go func() {

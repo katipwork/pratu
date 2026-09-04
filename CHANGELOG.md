@@ -2,6 +2,109 @@
 
 ## Unreleased
 
+- Capability-limited admin keys ([ADR 0009](docs/adr/0009-capability-limited-admin-keys.md),
+  [#10](https://github.com/katipwork/pratu/issues/10)): besides the
+  unrestricted root key, `admin.keys` configures any number of keys that
+  each hold a capability set (`tenants:create`, `clients:*`, …) and
+  optionally a set of tenant slug patterns. A provisioner that creates a
+  tenant and its OAuth2 client from application code can now hold a
+  credential that does those two things, instead of one that can rewrite
+  every tenant in the system.
+  - Every admin route names its capability where it is registered, so a
+    route cannot exist without one and there is no path-matching
+    middleware to fall out of step with the route table. A route carrying
+    `{slug}` has its tenant scope checked automatically; the two routes
+    that name no single tenant are registered through a differently-named
+    helper and check it themselves — creating a tenant against the slug in
+    its body, listing them by filtering the result.
+  - A tenant-restricted key is refused any request naming a tenant it
+    cannot check, and its tenant listing shows only its own: the list of
+    slugs is the list of customers.
+  - Config is validated at startup: an unknown capability, a duplicate key
+    name, a secret shared with another key or the root key, or a secret
+    under 16 characters stops the process, rather than leaving a key that
+    silently grants nothing.
+  - `403` (recognised key, missing capability) is now distinct from `401`
+    (unrecognised key), and names the capability it wanted. Deployments
+    that configure no `admin.keys` are unchanged, and the root key still
+    does everything.
+  - Each secret can be kept out of the config file as
+    `PRATU_ADMIN_KEY_<NAME>`.
+- Rate-limited responses always carry `Retry-After` when there is any
+  wait, rounded up. A window with less than a second left truncated to
+  `0`, which dropped the header entirely and left the client to guess —
+  and would have told it to retry immediately had it been sent.
+- Per-tenant login throttle ([#11](https://github.com/katipwork/pratu/issues/11)):
+  `login_throttle: { max_attempts, window_seconds }` in the tenant config,
+  settable at creation and through `PATCH /admin/tenants/{slug}`. The
+  per-identifier login limit was a fixed 5/minute, which is right for
+  production and hostile to an e2e suite: a handful of well-known
+  identities signing in at the start of many specs tripped it, and the runs
+  failed on the throttle rather than on anything they asserted. A test
+  tenant can now be given room while production tenants keep the default,
+  which is unchanged for every tenant that configures nothing.
+  - Deliberately a knob that can weaken brute-force protection: it reaches
+    one tenant at a time and only an operator holding the admin key can
+    turn it. The per-IP login limit is platform-wide — attackers spread
+    across tenants — and is not configurable per tenant, so relaxing a
+    tenant cannot escape it.
+  - `window_seconds` is capped at an hour. A throttle is a short-term
+    control; a longer window is account lockout, and in practice comes from
+    mistyping seconds as milliseconds.
+- Tenants can be removed ([ADR 0008](docs/adr/0008-tenant-disable-not-delete.md),
+  [#8](https://github.com/katipwork/pratu/issues/8)): `DELETE
+  /admin/tenants/{slug}` disables one and `POST /admin/tenants/{slug}/enable`
+  brings it back. Until now a tenant could be created but never removed, so
+  a provisioning saga that compensated left an orphan behind forever and dev
+  instances accreted dead tenants.
+  - Disabling is a soft delete. The tenant resolves from no hostname — by
+    slug or by custom domain — so its Self-Service Flows, OAuth2 endpoints,
+    JWKS and discovery all stop answering at once, while nothing it owns is
+    destroyed. Sessions are not revoked, only made unreachable, so enabling
+    restores the tenant whole instead of signing everyone out.
+  - The slug stays held. Freeing it would let `{slug}.{base_domain}` come to
+    mean a different identity namespace, so re-use has to be deliberate:
+    creating a tenant on a held slug still gets 409, now with a message
+    saying a disabled tenant holds it.
+  - `DELETE /admin/tenants/{slug}?purge=true` is the irreversible one:
+    it destroys the tenant and everything it owns and frees the slug for
+    re-use. Refused with 409 unless the tenant is already disabled, so
+    destruction is a deliberate second step and a wrong slug in a script
+    costs a disable rather than a customer's identities. A `purge` value
+    that is not a boolean is a 400, never read as the safer verb.
+    Tenant-owned tables are swept by their `ON DELETE CASCADE` foreign
+    keys; the platform-level `rate_limits` counters, which have none, are
+    deleted explicitly so a purged tenant leaves no identifiers behind.
+  - The admin API stays open on a disabled tenant — listable, readable,
+    patchable, sub-resources and all — because an operator who cannot see
+    what they closed cannot undo it. Public resolution cannot reach one at
+    all: the filter lives in the store behind `tenant.Store`, not in the
+    handlers.
+  - Disabling is idempotent, `disabled_at` keeping the moment it first went
+    off, so a compensating saga can run twice. An absent slug is a 404.
+  - Not a revocation primitive: an already-issued access token stays valid
+    until it expires (15 minutes), though its JWKS endpoint is gone.
+- `PATCH /admin/tenants/{slug}/clients/{id}`
+  ([#7](https://github.com/katipwork/pratu/issues/7)) edits a client's
+  `name`, `scopes` and `redirect_uris`, which previously could only be set
+  at creation. Absent keys are left alone and a present key replaces its
+  value outright, the same semantics `PATCH /admin/tenants/{slug}` has.
+  Retrofitting a custom scope, or adding a redirect_uri when a tenant
+  gains a custom domain, is a metadata edit again instead of a
+  DELETE + re-create that churned the `client_id` and secret every
+  consumer holds. `client_id`, the secret and `first_party` are not
+  editable, and saying otherwise in the body is a 400 rather than a
+  silent no-op.
+- `POST /admin/tenants/{slug}/clients/{id}/rotate-secret`
+  ([#9](https://github.com/katipwork/pratu/issues/9)) mints a fresh secret
+  for a confidential OAuth2 client and returns it once, leaving the
+  `client_id` untouched. Previously a secret was returned only at
+  creation, so losing or leaking one left `DELETE` + re-create as the
+  only recovery — churning the `client_id` that every consumer is
+  configured with, for what is really a credential swap. The previous
+  secret stops authenticating immediately; public clients have no secret
+  and are refused with 409.
+
 - Dependency upgrades clearing the open Dependabot alerts, none reachable
   from this code (`govulncheck` reports nothing before or after):
   `google.golang.org/grpc` 1.82.1 → 1.83.1 (CVE-2026-84304, an HTTP/2

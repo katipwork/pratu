@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/katipwork/pratu/internal/adminkey"
 )
 
 type Config struct {
@@ -67,9 +69,32 @@ type Public struct {
 
 type Admin struct {
 	Listen string `yaml:"listen"`
-	// RootKey authorizes the platform-level admin API. When empty, the
-	// admin API (beyond health checks) refuses all requests.
+	// RootKey authorizes the platform-level admin API without
+	// restriction. When it and Keys are both empty, the admin API
+	// (beyond health checks) refuses all requests.
 	RootKey string `yaml:"root_key"`
+	// Keys are capability-limited alternatives to the root key, so a
+	// service that needs admin access at runtime can hold a credential
+	// that does only its job (#10). Each key's secret may be supplied
+	// out of the file as PRATU_ADMIN_KEY_<NAME>, with the name
+	// upper-cased and non-alphanumerics turned into underscores.
+	Keys []adminkey.Key `yaml:"keys"`
+}
+
+// adminKeyEnv is where a key named "pilla-provisioner" reads its secret
+// from: PRATU_ADMIN_KEY_PILLA_PROVISIONER. Config files belong in
+// version control; admin secrets do not.
+func adminKeyEnv(name string) string {
+	var b strings.Builder
+	b.WriteString("PRATU_ADMIN_KEY_")
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	return b.String()
 }
 
 type Database struct {
@@ -126,6 +151,15 @@ func Load(path string) (Config, error) {
 	}
 	if s := cfg.OAuth2.SystemSecret; s != "" && len(s) < 32 {
 		return Config{}, errors.New("oauth2.system_secret must be at least 32 characters")
+	}
+	for i := range cfg.Admin.Keys {
+		override(&cfg.Admin.Keys[i].Secret, adminKeyEnv(cfg.Admin.Keys[i].Name))
+	}
+	// Build the ring here so a capability typo or a duplicated secret
+	// stops the process at startup rather than at the first request that
+	// silently lacks a permission.
+	if _, err := adminkey.NewKeyring(cfg.Admin.RootKey, cfg.Admin.Keys); err != nil {
+		return Config{}, err
 	}
 	switch cfg.Courier.Driver {
 	case "log":

@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -58,7 +57,7 @@ func (a *publicAPI) loginCodeSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identifier := identity.Normalize(body.Identifier)
-	if !a.allow(w, r, fmt.Sprintf("login:id:%s:%s", t.ID, identifier), limitLoginPerID, time.Minute) {
+	if !a.allowLoginAttempt(w, r, t, identifier) {
 		return
 	}
 

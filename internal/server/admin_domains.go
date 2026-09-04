@@ -16,8 +16,10 @@ import (
 
 var domainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$`)
 
+// tenantBySlug is an admin lookup, so it sees disabled tenants too
+// (ADR 0008).
 func (a *adminAPI) tenantBySlug(w http.ResponseWriter, r *http.Request) *tenant.Tenant {
-	t, err := a.tenants.FindBySlug(r.Context(), r.PathValue("slug"))
+	t, err := a.tenants.FindBySlugIncludingDisabled(r.Context(), r.PathValue("slug"))
 	if errors.Is(err, tenant.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "tenant not found")
 		return nil

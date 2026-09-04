@@ -14,14 +14,16 @@ import (
 
 var ErrDomainTaken = errors.New("domain is claimed by another tenant")
 
-// FindByDomain implements tenant.Store's custom-domain lookup.
+// FindByDomain implements tenant.Store's custom-domain lookup. Like
+// FindBySlug it is public resolution, so a disabled tenant is not found
+// here even though its domain claim survives (ADR 0008).
 func (s *TenantStore) FindByDomain(ctx context.Context, domain string) (*tenant.Tenant, error) {
 	var t tenant.Tenant
 	var config []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT t.id::text, t.slug, t.name, t.config
 		   FROM tenant_domains d JOIN tenants t ON t.id = d.tenant_id
-		  WHERE d.domain = $1`, domain,
+		  WHERE d.domain = $1 AND t.disabled_at IS NULL`, domain,
 	).Scan(&t.ID, &t.Slug, &t.Name, &config)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tenant.ErrNotFound

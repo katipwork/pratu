@@ -1,16 +1,17 @@
 package server
 
 import (
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/katipwork/pratu/internal/adminkey"
 	"github.com/katipwork/pratu/internal/identity"
 	"github.com/katipwork/pratu/internal/oauth2"
 	"github.com/katipwork/pratu/internal/password"
@@ -20,54 +21,48 @@ import (
 
 // NewAdmin builds the platform admin handler. It runs on its own listener
 // and is never routed through tenant hostnames. Health checks are open;
-// everything under /admin/ requires the root API key.
-func NewAdmin(pool *pgxpool.Pool, rootKey, baseDomain string, providers *oauth2.Providers) http.Handler {
+// everything under /admin/ needs an admin key carrying the capability
+// that route names (#10).
+func NewAdmin(pool *pgxpool.Pool, ring *adminkey.Keyring, baseDomain string, providers *oauth2.Providers) http.Handler {
 	admin := &adminAPI{pool: pool, tenants: storage.NewTenantStore(pool), providers: providers, baseDomain: strings.ToLower(baseDomain)}
 
-	api := http.NewServeMux()
-	api.HandleFunc("POST /admin/tenants", admin.createTenant)
-	api.HandleFunc("GET /admin/tenants", admin.listTenants)
-	api.HandleFunc("GET /admin/tenants/{slug}", admin.getTenant)
-	api.HandleFunc("PATCH /admin/tenants/{slug}", admin.updateTenant)
-	api.HandleFunc("POST /admin/tenants/{slug}/clients", admin.createClient)
-	api.HandleFunc("GET /admin/tenants/{slug}/clients", admin.listClients)
-	api.HandleFunc("DELETE /admin/tenants/{slug}/clients/{id}", admin.deleteClient)
-	api.HandleFunc("GET /admin/tenants/{slug}/identities/{id}/sessions", admin.listIdentitySessions)
-	api.HandleFunc("DELETE /admin/tenants/{slug}/identities/{id}/sessions", admin.revokeIdentitySessions)
-	api.HandleFunc("POST /admin/tenants/{slug}/keys/rotate", admin.rotateKey)
-	api.HandleFunc("GET /admin/tenants/{slug}/keys", admin.listKeys)
-	api.HandleFunc("DELETE /admin/tenants/{slug}/keys/{kid}", admin.deleteKey)
-	api.HandleFunc("GET /admin/tenants/{slug}/schemas", admin.listSchemas)
-	api.HandleFunc("GET /admin/tenants/{slug}/schemas/{name}", admin.getSchema)
-	api.HandleFunc("PUT /admin/tenants/{slug}/schemas/{name}", admin.putSchema)
-	api.HandleFunc("PUT /admin/tenants/{slug}/social/{provider}", admin.putSocialProvider)
-	api.HandleFunc("GET /admin/tenants/{slug}/social", admin.listSocialProviders)
-	api.HandleFunc("DELETE /admin/tenants/{slug}/social/{provider}", admin.deleteSocialProvider)
-	api.HandleFunc("PUT /admin/tenants/{slug}/domains/{domain}", admin.claimDomain)
-	api.HandleFunc("GET /admin/tenants/{slug}/domains", admin.listDomains)
-	api.HandleFunc("DELETE /admin/tenants/{slug}/domains/{domain}", admin.releaseDomain)
+	api := adminRouter{mux: http.NewServeMux()}
+	// The two routes that name no single tenant: createTenant checks the
+	// slug in its body, listTenants filters what it returns.
+	api.handleGlobal("POST /admin/tenants", adminkey.TenantsCreate, admin.createTenant)
+	api.handleGlobal("GET /admin/tenants", adminkey.TenantsRead, admin.listTenants)
+
+	api.handle("GET /admin/tenants/{slug}", adminkey.TenantsRead, admin.getTenant)
+	api.handle("PATCH /admin/tenants/{slug}", adminkey.TenantsUpdate, admin.updateTenant)
+	// A purge additionally demands tenants:purge, asked for inside the
+	// handler: one route, two levels of risk.
+	api.handle("DELETE /admin/tenants/{slug}", adminkey.TenantsDisable, admin.deleteTenant)
+	api.handle("POST /admin/tenants/{slug}/enable", adminkey.TenantsDisable, admin.enableTenant)
+	api.handle("POST /admin/tenants/{slug}/clients", adminkey.ClientsCreate, admin.createClient)
+	api.handle("GET /admin/tenants/{slug}/clients", adminkey.ClientsRead, admin.listClients)
+	api.handle("PATCH /admin/tenants/{slug}/clients/{id}", adminkey.ClientsUpdate, admin.updateClient)
+	api.handle("POST /admin/tenants/{slug}/clients/{id}/rotate-secret", adminkey.ClientsRotateSecret, admin.rotateClientSecret)
+	api.handle("DELETE /admin/tenants/{slug}/clients/{id}", adminkey.ClientsDelete, admin.deleteClient)
+	api.handle("GET /admin/tenants/{slug}/identities/{id}/sessions", adminkey.SessionsRead, admin.listIdentitySessions)
+	api.handle("DELETE /admin/tenants/{slug}/identities/{id}/sessions", adminkey.SessionsRevoke, admin.revokeIdentitySessions)
+	api.handle("POST /admin/tenants/{slug}/keys/rotate", adminkey.KeysRotate, admin.rotateKey)
+	api.handle("GET /admin/tenants/{slug}/keys", adminkey.KeysRead, admin.listKeys)
+	api.handle("DELETE /admin/tenants/{slug}/keys/{kid}", adminkey.KeysDelete, admin.deleteKey)
+	api.handle("GET /admin/tenants/{slug}/schemas", adminkey.SchemasRead, admin.listSchemas)
+	api.handle("GET /admin/tenants/{slug}/schemas/{name}", adminkey.SchemasRead, admin.getSchema)
+	api.handle("PUT /admin/tenants/{slug}/schemas/{name}", adminkey.SchemasWrite, admin.putSchema)
+	api.handle("PUT /admin/tenants/{slug}/social/{provider}", adminkey.SocialWrite, admin.putSocialProvider)
+	api.handle("GET /admin/tenants/{slug}/social", adminkey.SocialRead, admin.listSocialProviders)
+	api.handle("DELETE /admin/tenants/{slug}/social/{provider}", adminkey.SocialDelete, admin.deleteSocialProvider)
+	api.handle("PUT /admin/tenants/{slug}/domains/{domain}", adminkey.DomainsWrite, admin.claimDomain)
+	api.handle("GET /admin/tenants/{slug}/domains", adminkey.DomainsRead, admin.listDomains)
+	api.handle("DELETE /admin/tenants/{slug}/domains/{domain}", adminkey.DomainsDelete, admin.releaseDomain)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/alive", alive)
 	mux.HandleFunc("GET /health/ready", ready(pool))
-	mux.Handle("/admin/", requireRootKey(rootKey, api))
+	mux.Handle("/admin/", requireAdminKey(ring, api.mux))
 	return mux
-}
-
-func requireRootKey(rootKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if rootKey == "" {
-			writeError(w, http.StatusServiceUnavailable, "admin API disabled: no root key configured")
-			return
-		}
-		got := r.Header.Get("Authorization")
-		want := "Bearer " + rootKey
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 type adminAPI struct {
@@ -96,6 +91,17 @@ func validateTenantConfig(cfg tenant.Config) string {
 	}
 	if cfg.SMSDailyCap < 0 || cfg.SMSDailyCap > 1_000_000 {
 		return "sms_daily_cap must be between 0 and 1000000"
+	}
+	if n := cfg.LoginThrottle.MaxAttempts; n < 0 || n > 1_000_000 {
+		return "login_throttle.max_attempts must be between 0 and 1000000"
+	}
+	// A throttle is a short-term brute-force control; anything measured
+	// in hours is account lockout, which is a different feature. The
+	// ceiling is low enough to catch the typo that motivates it — a
+	// window meant as 60 seconds written as 60000 milliseconds, which
+	// would otherwise lock an identifier out for most of a day.
+	if s := cfg.LoginThrottle.WindowSeconds; s < 0 || s > 3_600 {
+		return "login_throttle.window_seconds must be between 0 and 3600"
 	}
 	switch cfg.MFA {
 	case "", tenant.MFAOff, tenant.MFAOptional, tenant.MFARequired:
@@ -142,16 +148,17 @@ func validFirstFactor(methods []string) bool {
 
 func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Slug         string                `json:"slug"`
-		Name         string                `json:"name"`
-		Verification string                `json:"verification"`
-		Password     tenant.PasswordConfig `json:"password"`
-		SMSDailyCap  int                   `json:"sms_daily_cap"`
-		MFA          string                `json:"mfa"`
-		FirstFactor  []string              `json:"first_factor"`
-		UI           tenant.UIConfig       `json:"ui"`
-		LoginURL     string                `json:"login_url"`
-		SocialReturn string                `json:"social_return_url"`
+		Slug          string                     `json:"slug"`
+		Name          string                     `json:"name"`
+		Verification  string                     `json:"verification"`
+		Password      tenant.PasswordConfig      `json:"password"`
+		SMSDailyCap   int                        `json:"sms_daily_cap"`
+		MFA           string                     `json:"mfa"`
+		FirstFactor   []string                   `json:"first_factor"`
+		UI            tenant.UIConfig            `json:"ui"`
+		LoginThrottle tenant.LoginThrottleConfig `json:"login_throttle"`
+		LoginURL      string                     `json:"login_url"`
+		SocialReturn  string                     `json:"social_return_url"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -165,6 +172,11 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	// The tenant this request touches is the one it is about to make, so
+	// its scope can only be checked now, against the slug in the body.
+	if !a.require(w, r, adminkey.TenantsCreate, body.Slug) {
+		return
+	}
 	cfg := tenant.Config{
 		Verification:    body.Verification,
 		Password:        body.Password,
@@ -172,6 +184,7 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 		MFA:             body.MFA,
 		FirstFactor:     body.FirstFactor,
 		UI:              body.UI,
+		LoginThrottle:   body.LoginThrottle,
 		LoginURL:        body.LoginURL,
 		SocialReturnURL: body.SocialReturn,
 	}
@@ -181,7 +194,14 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := a.tenants.Create(r.Context(), body.Slug, body.Name, cfg, []byte(identity.DefaultSchemaJSON))
 	if errors.Is(err, tenant.ErrSlugTaken) {
-		writeError(w, http.StatusConflict, "slug already in use")
+		// A slug held by a disabled tenant is a different situation from
+		// one in live use, and the caller can act on the difference:
+		// enable that tenant rather than go looking for another name.
+		msg := "slug already in use"
+		if held, ferr := a.tenants.FindBySlugIncludingDisabled(r.Context(), body.Slug); ferr == nil && held.Disabled() {
+			msg = "slug is held by a disabled tenant; enable it or choose another slug"
+		}
+		writeError(w, http.StatusConflict, msg)
 		return
 	}
 	if err != nil {
@@ -197,15 +217,16 @@ func (a *adminAPI) createTenant(w http.ResponseWriter, r *http.Request) {
 // its value outright, nested blocks (`password`, `ui`) included.
 func (a *adminAPI) updateTenant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name         *string                `json:"name"`
-		Verification *string                `json:"verification"`
-		Password     *tenant.PasswordConfig `json:"password"`
-		SMSDailyCap  *int                   `json:"sms_daily_cap"`
-		MFA          *string                `json:"mfa"`
-		FirstFactor  *[]string              `json:"first_factor"`
-		UI           *tenant.UIConfig       `json:"ui"`
-		LoginURL     *string                `json:"login_url"`
-		SocialReturn *string                `json:"social_return_url"`
+		Name          *string                     `json:"name"`
+		Verification  *string                     `json:"verification"`
+		Password      *tenant.PasswordConfig      `json:"password"`
+		SMSDailyCap   *int                        `json:"sms_daily_cap"`
+		MFA           *string                     `json:"mfa"`
+		FirstFactor   *[]string                   `json:"first_factor"`
+		UI            *tenant.UIConfig            `json:"ui"`
+		LoginThrottle *tenant.LoginThrottleConfig `json:"login_throttle"`
+		LoginURL      *string                     `json:"login_url"`
+		SocialReturn  *string                     `json:"social_return_url"`
 	}
 	if !readJSON(w, r, &body) {
 		return
@@ -238,6 +259,9 @@ func (a *adminAPI) updateTenant(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.UI != nil {
 			cfg.UI = *body.UI
+		}
+		if body.LoginThrottle != nil {
+			cfg.LoginThrottle = *body.LoginThrottle
 		}
 		if body.LoginURL != nil {
 			cfg.LoginURL = *body.LoginURL
@@ -275,6 +299,18 @@ func (a *adminAPI) listTenants(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
+	// A tenant-restricted key sees its own tenants and no others: the
+	// list of slugs is the list of customers, so an unfiltered listing
+	// would leak exactly what the scope exists to hide.
+	if g := grantsOf(r); g.TenantRestricted() {
+		visible := ts[:0]
+		for _, t := range ts {
+			if g.Allows(adminkey.TenantsRead, t.Slug) {
+				visible = append(visible, t)
+			}
+		}
+		ts = visible
+	}
 	if ts == nil {
 		ts = []tenant.Tenant{}
 	}
@@ -282,7 +318,7 @@ func (a *adminAPI) listTenants(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminAPI) getTenant(w http.ResponseWriter, r *http.Request) {
-	t, err := a.tenants.FindBySlug(r.Context(), r.PathValue("slug"))
+	t, err := a.tenants.FindBySlugIncludingDisabled(r.Context(), r.PathValue("slug"))
 	if errors.Is(err, tenant.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "tenant not found")
 		return
@@ -292,4 +328,76 @@ func (a *adminAPI) getTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+// deleteTenant disables by default and destroys only when asked in so
+// many words, because the two outcomes differ by the whole value of a
+// customer's identity namespace (ADR 0008).
+//
+// Disabling is the soft delete: the tenant stops resolving from any
+// hostname, so every public surface it had closes at once, while nothing
+// it owns is destroyed and its slug stays held. Disabling an
+// already-disabled tenant answers as the first call did, so a
+// compensating saga can run twice without special-casing.
+//
+// ?purge=true is the irreversible one, and is refused unless the tenant
+// is already disabled: the two-step is what keeps a wrong slug in a
+// script from costing a customer their identities.
+func (a *adminAPI) deleteTenant(w http.ResponseWriter, r *http.Request) {
+	purge := false
+	if raw := r.URL.Query().Get("purge"); raw != "" {
+		var err error
+		if purge, err = strconv.ParseBool(raw); err != nil {
+			// Never guess which of the two was meant. Silently disabling
+			// for a caller who typed a purge would report success for
+			// work that did not happen.
+			writeError(w, http.StatusBadRequest, "purge must be true or false")
+			return
+		}
+	}
+	if !purge {
+		a.setTenantDisabled(w, r, true)
+		return
+	}
+
+	slug := r.PathValue("slug")
+	// Disabling is reversible and destroying is not, so they are not the
+	// same permission even though they share a route.
+	if !a.require(w, r, adminkey.TenantsPurge, slug) {
+		return
+	}
+	switch err := a.tenants.Purge(r.Context(), slug); {
+	case errors.Is(err, tenant.ErrNotFound):
+		writeError(w, http.StatusNotFound, "tenant not found")
+	case errors.Is(err, tenant.ErrNotDisabled):
+		writeError(w, http.StatusConflict,
+			"disable the tenant before purging it: DELETE /admin/tenants/"+slug)
+	case err != nil:
+		internalError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"state": "purged", "slug": slug})
+	}
+}
+
+// enableTenant reopens a disabled tenant, sessions and all: nothing was
+// revoked, so the tenant comes back whole rather than signed out.
+func (a *adminAPI) enableTenant(w http.ResponseWriter, r *http.Request) {
+	a.setTenantDisabled(w, r, false)
+}
+
+func (a *adminAPI) setTenantDisabled(w http.ResponseWriter, r *http.Request, disabled bool) {
+	t, err := a.tenants.SetDisabled(r.Context(), r.PathValue("slug"), disabled)
+	switch {
+	case errors.Is(err, tenant.ErrNotFound):
+		writeError(w, http.StatusNotFound, "tenant not found")
+	case err != nil:
+		internalError(w, err)
+	default:
+		// Drop the cached signing material either way: a closed tenant
+		// should hold none, and a reopened one rebuilds from storage.
+		if a.providers != nil {
+			a.providers.Invalidate(t.ID)
+		}
+		writeJSON(w, http.StatusOK, t)
+	}
 }

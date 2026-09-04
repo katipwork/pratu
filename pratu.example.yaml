@@ -19,10 +19,34 @@ public:
 
 admin:
   listen: ":4434"
-  # Root API key for the platform admin API. Leave empty to disable the
-  # admin API; in production set PRATU_ADMIN_ROOT_KEY instead of using
-  # this file.
+  # Root API key for the platform admin API: unrestricted, for operators.
+  # Leave it and `keys` empty to disable the admin API; in production set
+  # PRATU_ADMIN_ROOT_KEY instead of using this file.
   root_key: ""
+
+  # Capability-limited keys, for services that need admin access at
+  # runtime and should not hold a credential that can do everything to
+  # every tenant (ADR 0009). Each key's secret can be kept out of this
+  # file as PRATU_ADMIN_KEY_<NAME> — name upper-cased, non-alphanumerics
+  # replaced by underscores (here: PRATU_ADMIN_KEY_PROVISIONER).
+  #
+  # capabilities: exact names, "resource:*", or "*". An unknown name
+  # stops the server at startup rather than granting nothing silently.
+  #   tenants:  read create update disable purge
+  #   clients:  read create update delete rotate-secret
+  #   sessions: read revoke
+  #   keys:     read rotate delete
+  #   schemas:  read write
+  #   social:   read write delete
+  #   domains:  read write delete
+  #
+  # tenants: restricts the key to matching tenant slugs; omit for all of
+  # them. A pattern is an exact slug or a trailing-wildcard prefix.
+  # keys:
+  #   - name: provisioner
+  #     key: ""
+  #     capabilities: [tenants:create, clients:create, clients:rotate-secret]
+  #     tenants: ["acme-*"]
 
 database:
   url: postgres://pratu:pratu@localhost:35432/pratu?sslmode=disable
